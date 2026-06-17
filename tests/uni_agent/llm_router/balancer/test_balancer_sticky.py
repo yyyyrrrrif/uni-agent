@@ -114,7 +114,7 @@ class TestStickyEndToEnd:
         )
         sid1, _ = balancer.acquire_server("r1", [1, 2])
         # mutate metrics: s0 now saturated (load>0.9), s1 healthy
-        balancer._provider._metrics = _kv_metrics(
+        balancer._store._metrics = _kv_metrics(
             {
                 "s0": {"kv": 1.0, "running": 64, "waiting": 1000},
                 "s1": {"kv": 0.3},

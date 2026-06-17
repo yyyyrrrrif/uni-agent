@@ -11,15 +11,6 @@ from uni_agent.llm_router.metric_spec import METRIC_SPECS
 class MetricsStore:
     """Unified metrics store: ``{node_id: {canonical_key: value}}``.
 
-    Thread-safe — a ``threading.Lock`` protects all reads and writes,
-    because the store can be written by collector asyncio tasks (on the
-    event-loop thread) and read by the balancer (on a Ray actor thread)
-    concurrently.
-
-    Singleton — use ``MetricsStore.default()`` to get the shared instance.
-    ``store_cls()`` (called by collectors) also returns the singleton via
-    the class-level ``__call__`` override.
-
     - ``get(node_id, key)``  → single value; falls back to ``METRIC_SPECS[key]["default"]``;
                                raises ``KeyError`` if key is not a valid canonical key
     - ``get(node_id)``       → entire node dict (empty dict if unknown)
@@ -27,20 +18,20 @@ class MetricsStore:
                                existing nodes NOT in ``new_data`` are left untouched
     """
 
-    _default: MetricsStore | None = None
+    _instance: MetricsStore | None = None
 
     def __init__(self) -> None:
         self._data: dict[str, dict[str, Any]] = {}
         self._lock: threading.Lock = threading.Lock()
 
     @classmethod
-    def default(cls) -> MetricsStore:
+    def singleton(cls) -> MetricsStore:
         """Return the shared singleton instance."""
-        if cls._default is None:
-            cls._default = cls()
-        return cls._default
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
-    def _get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
+    def get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
         """Read metrics.
 
         ``get(node_id, key)``  → single value, falls back to spec default.
@@ -48,22 +39,15 @@ class MetricsStore:
             (i.e. not present in ``METRIC_SPECS``).
         ``get(node_id)``       → entire node dict
         """
-        if key is not None:
-            if key not in METRIC_SPECS:
-                raise KeyError(f"Unknown metric key '{key}'. Valid keys: {sorted(METRIC_SPECS.keys())}")
-            with self._lock:
-                node = self._data.get(node_id, {})
-                if key in node:
-                    return node[key]
-                return METRIC_SPECS[key]["default"]
-        with self._lock:
+        if key is None:
             return dict(self._data.get(node_id, {}))
 
-    # Public aliases — ``get`` / ``get_metric`` / ``get_metrics`` all delegate
-    # to ``_get`` so callers can use whichever naming fits their context.
-    def get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
-        """Read metrics (public alias for ``_get``)."""
-        return self._get(node_id, key)
+        if key not in METRIC_SPECS:
+            raise KeyError(f"Unknown metric key '{key}'. Valid keys: {sorted(METRIC_SPECS.keys())}")
+        node = self._data.get(node_id, {})
+        if key in node:
+            return node[key]
+        return METRIC_SPECS[key]["default"]
 
     def refresh(self, new_data: dict[str, dict[str, Any]]) -> None:
         """Batch refresh from collectors.
@@ -83,30 +67,3 @@ class MetricsStore:
         """Return all node IDs currently in the store."""
         with self._lock:
             return list(self._data.keys())
-
-    def get_metric(self, node_id: str, key: str) -> Any:
-        """Query a polling metric by canonical key.
-
-        Delegates to ``MetricsStore.get(node_id, key)``.
-
-        Args:
-            node_id: Target node.
-            key: ``MetricKey`` constant, e.g. ``MetricKey.KV_CACHE_USAGE_PERC``.
-
-        Returns:
-            Metric value; falls back to ``METRIC_SPECS`` default if
-            node or metric is absent.
-        """
-        return self._get(node_id, key)
-
-    def get_metrics(self, node_id: str) -> dict[str, Any]:
-        """Get a node's full polling metrics snapshot.
-
-        Args:
-            node_id: Target node.
-
-        Returns:
-            Dict of canonical_key → value; empty dict if node
-            is absent in the store.
-        """
-        return self._get(node_id)

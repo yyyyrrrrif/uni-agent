@@ -6,8 +6,8 @@ from .config import (
     LocalAttachDeploymentConfig,
     LocalDeploymentConfig,
     LocalNativeDeploymentConfig,
-    SimulatedDeploymentConfig,
     ModalDeploymentConfig,
+    SimulatedDeploymentConfig,
     VefaasDeploymentConfig,
 )
 

@@ -24,6 +24,8 @@ from swerex.runtime.abstract import (
     Observation,
 )
 
+from .config import TerminalDeadConfig, TimeoutSimConfig
+
 # ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
@@ -64,24 +66,33 @@ _FINISH_OUTPUT = "<<<Finished>>>"
 
 _TEMPLATES: dict[str, list[tuple[int, str]]] = {
     "editor:view": [
-        (3, "Here's the result of running `cat -n` on /testbed/x.py:\n"
+        (
+            3,
+            "Here's the result of running `cat -n` on /testbed/x.py:\n"
             "     1\timport os\n"
             "     2\t\n"
             "     3\tclass Filter:\n"
             "     4\t    def __init__(self, model):\n"
-            "     5\t        self.model = model\n"),
-        (2, "Here's the result of running `cat -n` on /testbed/models.py:\n"
+            "     5\t        self.model = model\n",
+        ),
+        (
+            2,
+            "Here's the result of running `cat -n` on /testbed/models.py:\n"
             "     1\tclass Model:\n"
-            "     2\t    objects = Manager()\n"),
+            "     2\t    objects = Manager()\n",
+        ),
     ],
     "editor:create": [
         (5, "File created successfully at: /testbed/reproduce_issue.py"),
         (1, "ERROR: file already exists at /testbed/x.py. Use str_replace to edit it."),
     ],
     "editor:str_replace": [
-        (4, "The file /testbed/x.py has been edited. Here's the result of running `cat -n` on a snippet:\n"
+        (
+            4,
+            "The file /testbed/x.py has been edited. Here's the result of running `cat -n` on a snippet:\n"
             "    10\t    def filter(self, qs):\n"
-            "    11\t        return qs\n"),
+            "    11\t        return qs\n",
+        ),
         (1, "ERROR: old_str was not found in /testbed/x.py. Make sure it matches exactly."),
     ],
     "editor:insert": [
@@ -91,13 +102,18 @@ _TEMPLATES: dict[str, list[tuple[int, str]]] = {
         (5, "Last edit to /testbed/x.py has been reverted."),
     ],
     "test_output": [
-        (4, "============================= test session starts ==============================\n"
+        (
+            4,
+            "============================= test session starts ==============================\n"
             "platform linux -- Python 3.9.20, pytest-7.4.0\n"
             "rootdir: /testbed\n"
             "collected 5 items\n\n"
             "tests/test_x.py .....                                                 [100%]\n\n"
-            "============================== 5 passed in 2.13s ===============================\n"),
-        (3, "============================= test session starts ==============================\n"
+            "============================== 5 passed in 2.13s ===============================\n",
+        ),
+        (
+            3,
+            "============================= test session starts ==============================\n"
             "collected 5 items\n\n"
             "tests/test_x.py ..F..                                                [100%]\n\n"
             "=================================== FAILURES ===================================\n"
@@ -106,16 +122,20 @@ _TEMPLATES: dict[str, list[tuple[int, str]]] = {
             "E   AssertionError: assert 3 == 5\n"
             "=========================== short test summary info ===========================\n"
             "FAILED tests/test_x.py::test_third - AssertionError: assert 3 == 5\n"
-            "========================= 1 failed, 4 passed in 2.10s ==========================\n"),
+            "========================= 1 failed, 4 passed in 2.10s ==========================\n",
+        ),
     ],
     "python_script": [
         (5, "ok\n"),
-        (2, "Traceback (most recent call last):\n"
-            "  File \"/testbed/reproduce_issue.py\", line 5, in <module>\n"
+        (
+            2,
+            "Traceback (most recent call last):\n"
+            '  File "/testbed/reproduce_issue.py", line 5, in <module>\n'
             "    obj = load(path)\n"
-            "  File \"/testbed/pkg/loader.py\", line 21, in load\n"
+            '  File "/testbed/pkg/loader.py", line 21, in load\n'
             "    return _read(path)\n"
-            "FileNotFoundError: [Errno 2] No such file or directory: '/testbed/data.bin'\n"),
+            "FileNotFoundError: [Errno 2] No such file or directory: '/testbed/data.bin'\n",
+        ),
         (1, "/bin/bash: line 1: python: command not found\n"),
     ],
     "listing": [
@@ -204,11 +224,9 @@ class SimulatedRuntime(AbstractRuntime):
         observation_scale: float = 1.0,
         templates: dict[str, list[tuple[int, str]]] | None = None,
         templates_path: str | None = None,
-        timeout: "TimeoutSimConfig | None" = None,
-        terminal_dead: "TerminalDeadConfig | None" = None,
+        timeout: TimeoutSimConfig | None = None,
+        terminal_dead: TerminalDeadConfig | None = None,
     ) -> None:
-        from .config import TerminalDeadConfig, TimeoutSimConfig
-
         self.run_id = run_id
         self._seed = seed
         self.observation_scale = observation_scale
@@ -394,7 +412,7 @@ class SimulatedDeployment:
         self._started = False
 
     @classmethod
-    def from_config(cls, config, run_id: str | None = None) -> "SimulatedDeployment":
+    def from_config(cls, config, run_id: str | None = None) -> SimulatedDeployment:
         return cls(
             run_id=run_id or "simulated",
             seed=config.seed,
@@ -424,4 +442,3 @@ class SimulatedDeployment:
 
             raise DeploymentNotStartedError()
         return self._runtime
-

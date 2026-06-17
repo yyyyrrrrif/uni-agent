@@ -1,6 +1,6 @@
 """KV-cache-aware LLM Router configuration and routing primitives."""
 
-from uni_agent.llm_router.collectors import MetricKey, RouteDataProvider
+from uni_agent.llm_router.collectors import CollectorProvider
 from uni_agent.llm_router.config import (
     CacheStoreConfig,
     CollectorConfig,
@@ -9,6 +9,7 @@ from uni_agent.llm_router.config import (
     KVCAwareStrategyConfig,
     StrategyConfig,
 )
+from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.strategies import (
     KVCacheAwareStrategy,
     ReplicaInfo,
@@ -32,5 +33,5 @@ __all__ = [
     "route",
     "MetricKey",
     "ReplicaInfo",
-    "RouteDataProvider",
+    "CollectorProvider",
 ]

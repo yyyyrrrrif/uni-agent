@@ -5,20 +5,11 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterable
 
-from uni_agent.llm_router.hash import get_prefix_hashes
+from uni_agent.llm_router.utils.hash import get_prefix_hashes
 
 
 class KVCacheStore:
     """Mutable data carrier for KV cache mapping tables.
-
-    Thread-safe — a ``threading.Lock`` protects all reads and writes,
-    because the store can be written by ZMQ event collector tasks (on
-    the event-loop thread) and read by the balancer (on a Ray actor
-    thread) concurrently.
-
-    Singleton — use ``KVCacheStore.default()`` to get the shared instance.
-    ``store_cls()`` (called by collectors) also returns the singleton via
-    the class-level ``__call__`` override.
 
     Attributes:
         block_size: Learned block size (None until first BlockStored event).
@@ -26,7 +17,7 @@ class KVCacheStore:
             cache it.  Aligns with aibrix prefixMap (hash → pods).
     """
 
-    _default: KVCacheStore | None = None
+    _instance: KVCacheStore | None = None
 
     def __init__(self) -> None:
         self.block_size: int | None = None
@@ -34,11 +25,11 @@ class KVCacheStore:
         self._lock: threading.Lock = threading.Lock()
 
     @classmethod
-    def default(cls) -> KVCacheStore:
+    def singleton(cls) -> KVCacheStore:
         """Return the shared singleton instance."""
-        if cls._default is None:
-            cls._default = cls()
-        return cls._default
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
     # ── Replica management ──────────────────────────────────────────────
 
@@ -52,10 +43,11 @@ class KVCacheStore:
         with self._lock:
             stale_hashes: list[str] = []
             for bh, replicas in self.replicas_by_block.items():
-                if replica_id in replicas:
-                    replicas.discard(replica_id)
-                    if not replicas:
-                        stale_hashes.append(bh)
+                if replica_id not in replicas:
+                    continue
+                replicas.discard(replica_id)
+                if not replicas:
+                    stale_hashes.append(bh)
             for bh in stale_hashes:
                 del self.replicas_by_block[bh]
 
@@ -73,10 +65,11 @@ class KVCacheStore:
         """Remove blocks from a replica, updating the reverse index."""
         with self._lock:
             for bh in block_hashes:
-                if bh in self.replicas_by_block:
-                    self.replicas_by_block[bh].discard(replica_id)
-                    if not self.replicas_by_block[bh]:
-                        del self.replicas_by_block[bh]
+                if bh not in self.replicas_by_block:
+                    continue
+                self.replicas_by_block[bh].discard(replica_id)
+                if not self.replicas_by_block[bh]:
+                    del self.replicas_by_block[bh]
 
     # ── Prefix hit rate queries ─────────────────────────────────────────
 

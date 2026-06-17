@@ -15,7 +15,7 @@ class KVCacheEvent:
 
     Attributes:
         event_type: ``"stored"`` / ``"removed"`` / ``"clear"``.
-        replica_id: Source replica (from ZMQ connection or group_idx).
+        node_id: Source endpoint (from ZMQ connection or group_idx).
         block_hashes: Block hashes involved in the event (list from msgpack).
         parent_block_hash: Parent block hash — single value shared by all
                            block_hashes in a BlockStored event.
@@ -26,7 +26,7 @@ class KVCacheEvent:
     """
 
     event_type: str
-    replica_id: str
+    node_id: str
     block_hashes: list[str]
     parent_block_hash: str | None
     token_ids: list[bytes] | None
@@ -35,7 +35,7 @@ class KVCacheEvent:
     # ── Factory ──────────────────────────────────────────────────────────
 
     @classmethod
-    def from_raw(cls, raw_data: Any, default_replica_id: str | None = None) -> list[KVCacheEvent]:
+    def from_raw(cls, raw_data: Any, default_node_id: str | None = None) -> list[KVCacheEvent]:
         """Parse msgpack-decoded raw data into a list of KVCacheEvent instances.
 
         Parsing pattern::
@@ -47,7 +47,7 @@ class KVCacheEvent:
 
         Args:
             raw_data: Msgpack-decoded list ``[timestamp, [[tag, fields...], ...]]``.
-            default_replica_id: Fallback replica_id when raw data lacks it.
+            default_node_id: Fallback node_id when raw data lacks it.
 
         Returns:
             A list of KVCacheEvent instances.  Malformed events are skipped.
@@ -73,9 +73,9 @@ class KVCacheEvent:
             if event_type.startswith("unknown"):
                 continue
 
-            replica_id = default_replica_id or ""
+            node_id = default_node_id or ""
             try:
-                event = cls._build_event(event_type, fields, replica_id)
+                event = cls._build_event(event_type, fields, node_id)
                 if event is not None:
                     results.append(event)
             except (ValueError, TypeError, IndexError):
@@ -90,19 +90,19 @@ class KVCacheEvent:
         cls,
         event_type: str,
         fields: list | tuple,
-        replica_id: str,
+        node_id: str,
     ) -> KVCacheEvent | None:
         """Dispatch to the appropriate builder by event_type."""
         if event_type == "stored":
-            return cls._build_block_stored(fields, replica_id)
+            return cls._build_block_stored(fields, node_id)
         elif event_type == "removed":
-            return cls._build_block_removed(fields, replica_id)
+            return cls._build_block_removed(fields, node_id)
         elif event_type == "clear":
-            return cls._build_all_blocks_cleared(replica_id)
+            return cls._build_all_blocks_cleared(node_id)
         return None
 
     @classmethod
-    def _build_block_stored(cls, fields: list | tuple, replica_id: str) -> KVCacheEvent:
+    def _build_block_stored(cls, fields: list | tuple, node_id: str) -> KVCacheEvent:
         """Build a BlockStored event from its field list.
 
         Field order (after tag):
@@ -127,7 +127,7 @@ class KVCacheEvent:
 
         return cls(
             event_type="stored",
-            replica_id=replica_id,
+            node_id=node_id,
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
@@ -135,7 +135,7 @@ class KVCacheEvent:
         )
 
     @classmethod
-    def _build_block_removed(cls, fields: list | tuple, replica_id: str) -> KVCacheEvent:
+    def _build_block_removed(cls, fields: list | tuple, node_id: str) -> KVCacheEvent:
         """Build a BlockRemoved event from its field list.
 
         Field order (after tag):
@@ -147,7 +147,7 @@ class KVCacheEvent:
 
         return cls(
             event_type="removed",
-            replica_id=replica_id,
+            node_id=node_id,
             block_hashes=block_hashes,
             parent_block_hash=None,
             token_ids=None,
@@ -155,11 +155,11 @@ class KVCacheEvent:
         )
 
     @classmethod
-    def _build_all_blocks_cleared(cls, replica_id: str) -> KVCacheEvent:
+    def _build_all_blocks_cleared(cls, node_id: str) -> KVCacheEvent:
         """Build an AllBlocksCleared event — no fields after tag."""
         return cls(
             event_type="clear",
-            replica_id=replica_id,
+            node_id=node_id,
             block_hashes=[],
             parent_block_hash=None,
             token_ids=None,

@@ -98,12 +98,12 @@ class TestPluginExtensionEndToEnd:
         """
         Feature: construction wires provider/strategies, and acquire invokes route()
         Description: get_router_handle → get_status (construction) → acquire → get_status (route called)
-        Expectation: before acquire, provider=RouteDataProvider, strategy materialized, route_calls=0;
+        Expectation: before acquire, provider=CollectorProvider, strategy materialized, route_calls=0;
                      after one acquire, route_calls=1
         """
         handle = get_router_handle({"s0": "h0", "s1": "h1"}, _router_config())
         status = ray.get(handle.get_status.remote())
-        assert status["provider"] == "RouteDataProvider"
+        assert status["provider"] == "CollectorProvider"
         assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
         assert set(status["servers"]) == {"s0", "s1"}
         assert status["route_calls"] == 0

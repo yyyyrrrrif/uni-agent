@@ -109,7 +109,7 @@ def vllm_kv_service():
     proc = subprocess.Popen(cmd)
 
     metrics_url = f"http://{NODE_ID}/metrics"
-    max_wait = 360
+    max_wait = 180
     deadline = time.time() + max_wait
     ready = False
 

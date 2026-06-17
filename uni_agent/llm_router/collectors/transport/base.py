@@ -1,13 +1,7 @@
 """Transport — abstract base for data transport layers.
 
 A Transport fetches raw data from a network source (ZMQ, HTTP, etc.)
-and delivers it to a handler callback.  It does NOT decode or interpret
-the data — that is the Decoder's job.
-
-Lifecycle:
-    ``subscribe(handler)`` — async; starts the data-fetch loop,
-        calls ``handler(raw_data, node_id)`` for each received item.
-    ``stop()`` — sync; blocks until the transport has fully shut down.
+and delivers it to a handler callback.
 """
 
 from __future__ import annotations
@@ -31,9 +25,14 @@ class Transport(ABC):
         Args:
             handler: Callback that receives (raw_data, node_id).
                 raw_data is ``bytes`` (ZMQ) or ``str`` (HTTP response text).
-                node_id identifies the source replica/node.
+                node_id identifies the source endpoint/node.
         """
 
     @abstractmethod
     def stop(self) -> None:
-        """Stop the transport synchronously — blocks until cleanup is done."""
+        """Signal stop and close protocol-level resources (sockets/clients).
+
+        Implementations should only:
+          1. set a stop flag so subscribe loops exit,
+          2. close sockets / contexts / http clients (idempotently).
+        """

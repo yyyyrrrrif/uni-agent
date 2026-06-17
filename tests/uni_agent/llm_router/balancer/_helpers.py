@@ -100,7 +100,7 @@ def _patch_provider():
     from uni_agent.llm_router.balancer import KVCAwareBalancer
 
     # Save originals
-    _orig_provider = _collectors_mod.RouteDataProvider
+    _orig_provider = _collectors_mod.CollectorProvider
     _orig_init = KVCAwareBalancer._init_provider
 
     # Patch RouteDataProvider so balancer.py (which imports it at top level)
@@ -111,11 +111,11 @@ def _patch_provider():
     # attribute on the module is sufficient even if balancer.py is already
     # loaded, because it looks up RouteDataProvider from the module at
     # call time (not import time).
-    _collectors_mod.RouteDataProvider = _FakeProvider
+    _collectors_mod.CollectorProvider = _FakeProvider
     KVCAwareBalancer._init_provider = _fake_init_provider
 
     yield
 
     # Restore — Ray workers forked AFTER this will get the real provider
-    _collectors_mod.RouteDataProvider = _orig_provider
+    _collectors_mod.CollectorProvider = _orig_provider
     KVCAwareBalancer._init_provider = _orig_init

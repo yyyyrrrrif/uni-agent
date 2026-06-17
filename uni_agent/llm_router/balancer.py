@@ -14,15 +14,16 @@ from __future__ import annotations
 
 from typing import Any
 
-# Import RouteDataProvider from its definition module (collectors.provider),
+# Import CollectorProvider from its definition module (collectors.provider),
 # not the ``collectors`` package attribute. Unit tests in test_balancer.py
-# monkeypatch ``collectors.RouteDataProvider`` to a fake; if we imported via the
+# monkeypatch ``collectors.CollectorProvider`` to a fake; if we imported via the
 # package, Ray worker processes that fork from the patched pytest process would
 # bind the fake and report "_FakeProvider" in get_status(). Sourcing the class
 # from its definition site is immune to that package-attribute patch.
-from uni_agent.llm_router.collectors.provider import RouteDataProvider
+from uni_agent.llm_router.collectors.provider import CollectorProvider
 from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.logging import get_router_logger
+from uni_agent.llm_router.store import DataStore
 from uni_agent.llm_router.strategies import (
     ReplicaInfo,
     StickySessionTable,
@@ -51,6 +52,7 @@ class KVCAwareBalancer:
         # short-circuit to a bound, non-overloaded replica.
         self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
         self._init_provider()
+        self._store = DataStore()
 
     def _init_provider(self) -> None:
         """Resolve per-server endpoints from Ray actor handles and init the provider.
@@ -58,7 +60,7 @@ class KVCAwareBalancer:
         Iterates ``self._servers``, calling ``get_server_address.remote()`` and
         ``get_kv_events_endpoints.remote()`` on each handle to dynamically
         discover the Prometheus polling addresses and ZMQ kv-event endpoints.
-        The resolved addresses are then passed to ``RouteDataProvider``, which
+        The resolved addresses are then passed to ``CollectorProvider``, which
         routes them to the appropriate collector type at creation time.
 
         Handles that are not real Ray actors (e.g. plain strings passed by
@@ -83,7 +85,7 @@ class KVCAwareBalancer:
             endpoints = ray.get(handle.get_kv_events_endpoints.remote())
             if endpoints is not None:
                 kv_event_endpoints[replica_id] = endpoints
-        self._provider = RouteDataProvider(
+        self._provider = CollectorProvider(
             self._config.collector,
             collection_names,
             server_addresses=server_addresses,
@@ -132,7 +134,7 @@ class KVCAwareBalancer:
         ranking = route(
             self._strategies,
             prompt_ids,
-            self._provider,
+            self._store,
             replicas,
             request_id,
             self._sticky,

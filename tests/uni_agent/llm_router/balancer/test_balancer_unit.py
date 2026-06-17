@@ -92,7 +92,7 @@ class TestTrivialMethods:
         balancer = _make_balancer({"s0": "h0"})
         status = balancer.get_status()
         # provider is the injected _FakeProvider in unit tests; real env reports
-        # "RouteDataProvider". Assert it matches the constructed provider's type.
+        # "CollectorProvider". Assert it matches the constructed provider's type.
         assert status["provider"] == type(balancer._provider).__name__
         assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
         assert status["servers"] == ["s0"]
