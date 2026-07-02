@@ -25,7 +25,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODEL_PATH=${1:?ERROR: MODEL_PATH is required}
 DATA_PATH=${2:-${SCRIPT_DIR}/swe_bench_verified_modal.parquet}
 AGENT_CONFIG=${3:-${SCRIPT_DIR}/agent_config_localdocker.yaml}
-shift 3 2>/dev/null || set --  # drop the first 3; "$@" = remaining flags
+LLM_ROUTER_LOG_FILE_PATH=${4:-${SCRIPT_DIR}/llm_router_log_file.log}
+shift 4 2>/dev/null || set --  # drop the first 3; "$@" = remaining flags
+
+export LLM_ROUTER_LOG_FILE="${LLM_ROUTER_LOG_FILE_PATH}"
 
 # Pre-flight checks
 for var_name in DATA_PATH MODEL_PATH AGENT_CONFIG; do

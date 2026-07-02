@@ -22,7 +22,7 @@ from typing import Any
 # from its definition site is immune to that package-attribute patch.
 from uni_agent.llm_router.collectors.provider import CollectorProvider
 from uni_agent.llm_router.config import KVCAwareConfig
-from uni_agent.llm_router.logging import get_router_logger
+from uni_agent.llm_router.logging import _ensure_file_sink, get_router_logger
 from uni_agent.llm_router.store import DataStore
 from uni_agent.llm_router.strategies import (
     ReplicaInfo,
@@ -40,6 +40,13 @@ class KVCAwareBalancer:
     def __init__(self, servers: dict[str, Any], router_config: Any) -> None:
         if not servers:
             raise ValueError("servers must be non-empty")
+        # Re-register the optional file sink now — at this point all module
+        # imports are settled, so any ``logger.remove()`` run by
+        # ``uni_agent.async_logging`` during import has already cleared the
+        # sink we added at ``llm_router.logging`` import time. This restores it
+        # (idempotent) so SCORE_ROW/ROUTE_WINNER lines land in
+        # ``$LLM_ROUTER_LOG_FILE`` when that env var is set.
+        _ensure_file_sink()
         self._config = KVCAwareConfig.from_config(router_config)
         self._strategies: list[tuple[Any, float]] = [
             (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight) for cfg in self._config.strategies

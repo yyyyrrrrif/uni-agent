@@ -100,6 +100,7 @@ def route(
             logger.warning(
                 f"route(): {name} failed ({type(exc).__name__}: {exc}), falling back to random order",
             )
+            logger.info(f"ROUTE_WINNER request_id={request_id} route_to={ids[0]}")
             return ids
         for idx in range(n):
             final[idx] += weight * scores[idx]
@@ -107,4 +108,9 @@ def route(
     ranking = sorted(range(n), key=lambda idx: _rank_key(final[idx]), reverse=True)
     scores_str = ", ".join(f"{replicas[idx].replica_id}={final[idx]:.4f}" for idx in ranking)
     logger.info(f"route(): replicas={n} ranking=[{scores_str}]")
+    # Authoritative final pick under (possibly multi-strategy) weighting.
+    # The collection script back-fills this onto the most recent same-request_id
+    # SCORE_ROW's route_to, overriding each strategy's local argmax pick.
+    winner = replicas[ranking[0]].replica_id
+    logger.info(f"ROUTE_WINNER request_id={request_id} route_to={winner}")
     return [replicas[idx].replica_id for idx in ranking]

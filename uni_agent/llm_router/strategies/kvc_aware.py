@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
@@ -29,6 +30,29 @@ STICKY_TOP_SCORE = 1e9
 
 class StrategyError(Exception):
     """Strategy construction or scoring error."""
+
+
+@dataclass(frozen=True)
+class _StickyVerdict:
+    """Outcome of a sticky short-circuit probe.
+
+    ``scores``:
+        - non-None → sticky replica won outright; this list is the final
+          score vector (``STICKY_TOP_SCORE`` at the bound index, ``0.0``
+          elsewhere). ``score()`` returns it directly.
+        - None → did not short-circuit; ``score()`` falls through to combined
+          scoring.
+    ``overload_fallback``:
+        True iff a binding existed for ``request_id`` and the bound replica
+        was in the pool but overloaded, forcing a combined-scoring fallback.
+        Distinguishes the "wanted sticky but gave up" case (True) from the
+        "no binding / bound replica gone" cases (False) so the SCORE_ROW log
+        can set ``is_sticky_but_overload`` honestly. Only meaningful when
+        ``scores is None``.
+    """
+
+    scores: list[float] | None
+    overload_fallback: bool = False
 
 
 class KVCacheAwareStrategy:
@@ -79,6 +103,12 @@ class KVCacheAwareStrategy:
         # max_num_seqs drives the normalized load formula's running term.
         # None → resolve from the MAX_NUM_SEQS env var (default 64).
         self._max_num_seqs = int(max_num_seqs) if max_num_seqs is not None else resolve_max_num_seqs()
+        # Per-request score() call counter: request_id → times called. Lets
+        # each SCORE_ROW log carry "which turn of this conversation". Plain
+        # dict (no LRU) — the strategy lives for the balancer's lifetime (one
+        # Ray actor, serial acquire_server → no locking needed, same
+        # concurrency model as the balancer's _sticky table).
+        self._call_turns: dict[str, int] = {}
         logger.info(
             f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, "
             f"load_threshold={self.load_threshold:.2f}, layer_weights={self.layer_weights}, "
@@ -142,20 +172,24 @@ class KVCacheAwareStrategy:
         replicas: list[ReplicaInfo],
         request_id: str | None,
         sticky_table: Any,
-    ) -> list[float] | None:
-        """Return a pre-built score list if a sticky replica should win, else None.
+    ) -> _StickyVerdict:
+        """Probe the sticky short-circuit; return a ``_StickyVerdict``.
 
         Sticky replica wins when: ``request_id``/``sticky_table`` are provided,
         the bound replica is present in ``replicas``, and it is NOT overloaded.
-        On win, returns a list with ``STICKY_TOP_SCORE`` at the bound replica's
-        index and ``0.0`` elsewhere. On miss / overload / absence, returns
-        ``None`` so the caller falls through to combined scoring.
+        On win, ``scores`` is a list with ``STICKY_TOP_SCORE`` at the bound
+        replica's index and ``0.0`` elsewhere (and ``overload_fallback=False``).
+        On miss / absence, returns ``scores=None, overload_fallback=False`` so
+        the caller falls through to combined scoring. On overload, returns
+        ``scores=None, overload_fallback=True`` — same combined-scoring
+        fallback, but the flag lets the caller log ``is_sticky_but_overload``
+        honestly.
         """
         if not request_id or sticky_table is None:
-            return None
+            return _StickyVerdict(scores=None, overload_fallback=False)
         sticky_id = sticky_table.get(request_id)
         if sticky_id is None:
-            return None
+            return _StickyVerdict(scores=None, overload_fallback=False)
         for idx, replica in enumerate(replicas):
             if replica.replica_id == sticky_id:
                 m = store.get_metrics(replica.replica_id)
@@ -171,19 +205,19 @@ class KVCacheAwareStrategy:
                     logger.info(
                         f"score(): STICKY replica={sticky_id} OVERLOADED [{metrics_str}] → fallback to COMBINED scoring"
                     )
-                    return None
+                    return _StickyVerdict(scores=None, overload_fallback=True)
                 logger.info(
                     f"score(): STICKY replica={sticky_id} HIT (not overloaded) [{metrics_str}] "
                     f"→ short-circuit (top score)"
                 )
                 scores = [0.0] * len(replicas)
                 scores[idx] = STICKY_TOP_SCORE
-                return scores
+                return _StickyVerdict(scores=scores, overload_fallback=False)
         # Bound replica no longer in pool — let the Balancer invalidate it.
         logger.info(
             f"score(): sticky replica={sticky_id} not in pool, fallback to combined scoring",
         )
-        return None
+        return _StickyVerdict(scores=None, overload_fallback=False)
 
     def score(
         self,
@@ -208,17 +242,56 @@ class KVCacheAwareStrategy:
         provided and the bound replica is present and NOT overloaded, returns a
         pre-built score list placing that replica first (sticky replica gets
         ``STICKY_TOP_SCORE``, others ``0.0``), skipping combined scoring.
+
+        Observability: each call increments a per-``request_id`` turn counter
+        (``self._call_turns``) and emits one ``SCORE_ROW`` structured log line
+        whose fields map 1:1 to the routing-decision table columns
+        (request_id, call_turns, route_to, is_sticky, is_sticky_but_overload,
+        is_combined, kv_usage, running, waiting, load, s_load, s_cache,
+        gpu_hit). The sticky-hit path logs ``s_cache``/``gpu_hit`` as ``-``
+        (combined scoring is skipped); every combined path — including
+        sticky-overload fallback — logs real values. ``route()`` emits a
+        ``ROUTE_WINNER`` line for the authoritative final pick under
+        multi-strategy weighting.
         """
         if not isinstance(replicas, list):
             raise StrategyError(f"replicas must be a list, got {type(replicas).__name__}")
         if not replicas:
             return []
 
-        # Sticky short-circuit: bound, non-overloaded replica wins outright.
-        shortcut = self._sticky_shortcut(store, replicas, request_id, sticky_table)
-        if shortcut is not None:
-            return shortcut
+        # Per-request call counter (turn N of this conversation). Computed
+        # before scoring so the SCORE_ROW log carries it. request_id=None
+        # (stateless caller) is logged as "-" and not counted.
+        if request_id is not None:
+            self._call_turns[request_id] = self._call_turns.get(request_id, 0) + 1
+            call_turns: int | str = self._call_turns[request_id]
+        else:
+            call_turns = "-"
 
+        # Sticky short-circuit: bound, non-overloaded replica wins outright.
+        verdict = self._sticky_shortcut(store, replicas, request_id, sticky_table)
+        if verdict.scores is not None:
+            # Sticky HIT. Re-fetch the bound replica's metrics for the
+            # SCORE_ROW log (s_cache/gpu_hit are not computed on this path —
+            # the short-circuit skips combined scoring — so they log as "-").
+            sticky_id = sticky_table.get(request_id)
+            sticky_replica = next(r for r in replicas if r.replica_id == sticky_id)
+            m = store.get_metrics(sticky_replica.replica_id)
+            kv_usage = m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
+            running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
+            waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
+            load = self._compute_load(kv_usage, running, waiting)
+            s_load = 1.0 - load
+            logger.info(
+                f"SCORE_ROW request_id={request_id} call_turns={call_turns} "
+                f"route_to={sticky_id} is_sticky=true is_sticky_but_overload=false "
+                f"is_combined=false kv_usage={kv_usage:.4f} running={running} waiting={waiting} "
+                f"load={load:.4f} s_load={s_load:.4f} s_cache=- gpu_hit=-"
+            )
+            return verdict.scores
+
+        # Combined scoring (covers: no binding, bound replica gone, and sticky
+        # overload-fallback — the last iff verdict.overload_fallback).
         effective_prompt_ids = prompt_ids or []
 
         # GPU prefix hit is the same prompt for every replica — query once.
@@ -227,6 +300,7 @@ class KVCacheAwareStrategy:
         gpu_hit_pct = store.get_gpu_prefix_hit_rate(effective_prompt_ids)
 
         result = []
+        per_replica: list[dict[str, Any]] = []
         for replica in replicas:
             m = store.get_metrics(replica.replica_id)
             kv_usage = m.get(MetricKey.KV_CACHE_USAGE_PERC, 0.0)
@@ -238,6 +312,19 @@ class KVCacheAwareStrategy:
             score = self.alpha * s_cache + (1 - self.alpha) * s_load
             result.append(score)
             gpu_hit = gpu_hit_pct.get(replica.replica_id, 0) / 100.0
+            per_replica.append(
+                {
+                    "replica_id": replica.replica_id,
+                    "kv_usage": kv_usage,
+                    "running": running,
+                    "waiting": waiting,
+                    "load": load,
+                    "s_load": s_load,
+                    "s_cache": s_cache,
+                    "gpu_hit": gpu_hit,
+                    "score": score,
+                }
+            )
             logger.info(
                 f"score(): replica={replica.replica_id} kv={kv_usage:.3f} running={running} waiting={waiting} "
                 f"→ load={load:.4f} s_load={s_load:.4f} | gpu_hit={gpu_hit:.2f} s_cache={s_cache:.4f} "
@@ -245,6 +332,20 @@ class KVCacheAwareStrategy:
             )
         scores_str = ", ".join(f"{r.replica_id}={result[i]:.4f}" for i, r in enumerate(replicas))
         logger.info(f"score(): COMBINED scores: {scores_str}")
+
+        # Candidate winner = argmax of this strategy's scores. route() may
+        # still reorder under multi-strategy weighting; the ROUTE_WINNER log
+        # there is authoritative. The SCORE_ROW logs the strategy-local pick.
+        winner = max(per_replica, key=lambda d: d["score"])
+        logger.info(
+            f"SCORE_ROW request_id={request_id} call_turns={call_turns} "
+            f"route_to={winner['replica_id']} is_sticky=false "
+            f"is_sticky_but_overload={'true' if verdict.overload_fallback else 'false'} "
+            f"is_combined=true kv_usage={winner['kv_usage']:.4f} running={winner['running']} "
+            f"waiting={winner['waiting']} load={winner['load']:.4f} "
+            f"s_load={winner['s_load']:.4f} s_cache={winner['s_cache']:.4f} "
+            f"gpu_hit={winner['gpu_hit']:.4f}"
+        )
         return result
 
     def _cache_score(
