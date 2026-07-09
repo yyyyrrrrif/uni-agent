@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import zmq
 import zmq.asyncio
@@ -62,23 +62,22 @@ class ZMQTransport(Transport):
         self._replay_endpoints: dict[str, str] = {}
         self._topics: dict[str, str] = {}
         for node_id, addrs in endpoints.items():
-            if len(addrs) < 4:
-                raise ValueError(
-                    f"endpoint '{node_id}' needs 4 elements [sub, replay, publisher, topic], got {len(addrs)}"
-                )
-            if addrs[2] != "zmq":
-                raise ValueError(f"endpoint '{node_id}' publisher must be 'zmq', got '{addrs[2]}'")
-            self._sub_endpoints[node_id] = f"tcp://{addrs[0]}"
-            self._replay_endpoints[node_id] = f"tcp://{addrs[1]}"
-            self._topics[node_id] = addrs[3]
+            self._parse_one_endpoint(node_id, addrs)
 
         self._stopped = False
         self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
         self._retry_counts: dict[str, int] = {}
         self._sub_tasks: dict[str, asyncio.Task] = {}
+        # Held for dynamic add/remove — subscribe records the running loop
+        # (so add_endpoint can schedule the per-endpoint task on it) and the
+        # handler (so a late-added endpoint feeds the same decode path).
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._handler: Callable[[bytes | str, str], None] | None = None
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Spawn per-endpoint subscription tasks, deliver payloads to handler."""
+        self._loop = asyncio.get_running_loop()
+        self._handler = handler
         sub_tasks = []
         for node_id in self._sub_endpoints:
             sub_addr = self._sub_endpoints[node_id]
@@ -93,6 +92,70 @@ class ZMQTransport(Transport):
                 t.cancel()
         finally:
             self._close_all_zmq_sockets()
+
+    # ── Dynamic endpoint management ─────────────────────────────────────
+
+    def _parse_one_endpoint(self, node_id: str, addrs: list[str]) -> tuple[str, str, str]:
+        """Validate + parse one endpoint into (sub_addr, replay_addr, topic).
+
+        Shared by ``__init__`` (bulk) and ``add_endpoint`` (single) so the
+        4-element / publisher=='zmq' validation lives in one place. Mutates
+        ``_sub_endpoints`` / ``_replay_endpoints`` / ``_topics``.
+        """
+        if len(addrs) < 4:
+            raise ValueError(
+                f"endpoint '{node_id}' needs 4 elements [sub, replay, publisher, topic], got {len(addrs)}"
+            )
+        if addrs[2] != "zmq":
+            raise ValueError(f"endpoint '{node_id}' publisher must be 'zmq', got '{addrs[2]}'")
+        self._sub_endpoints[node_id] = f"tcp://{addrs[0]}"
+        self._replay_endpoints[node_id] = f"tcp://{addrs[1]}"
+        self._topics[node_id] = addrs[3]
+        return self._sub_endpoints[node_id], self._replay_endpoints[node_id], self._topics[node_id]
+
+    def add_endpoint(self, node_id: str, endpoint: Any) -> None:
+        """Register a new endpoint and start its subscription task.
+
+        ``endpoint`` is the 4-element list ``[sub, replay, "zmq", topic]``
+        (same form ``__init__`` accepts). Parsed via ``_parse_one_endpoint``
+        then the per-endpoint subscription coroutine is created as an
+        ``asyncio.Task`` on the running subscribe loop (this method runs on
+        the balancer's thread, not the loop thread). Fire-and-forget — the
+        task connects with backoff on its own; the caller doesn't wait.
+        """
+        sub_addr, replay_addr, _ = self._parse_one_endpoint(node_id, list(endpoint))
+        if self._loop is None or self._handler is None:
+            raise RuntimeError("ZMQTransport.add_endpoint called before subscribe started")
+        # If an old task lingers for this id (re-add after remove), drop it.
+        old = self._sub_tasks.pop(node_id, None)
+        if old is not None and not old.done():
+            old.cancel()
+        # Create the real asyncio.Task on the loop thread and stash it in
+        # _sub_tasks, so remove_endpoint/stop cancel the actual coroutine
+        # (not just the run_coroutine_threadsafe Future wrapper).
+        def _spawn() -> None:
+            self._sub_tasks[node_id] = self._loop.create_task(  # type: ignore[union-attr]
+                self._subscribe_for_endpoint(node_id, sub_addr, replay_addr, self._handler)
+            )
+        self._loop.call_soon_threadsafe(_spawn)  # type: ignore[union-attr]
+
+    def remove_endpoint(self, node_id: str) -> None:
+        """Stop an endpoint's subscription and close its ZMQ sockets.
+
+        Synchronous: cancels the per-endpoint task and closes its sockets so
+        a gone replica's endpoint stops immediately. The task's own finally
+        block re-runs ``_close_zmq_sockets_for`` — idempotent via the
+        ``closed`` guard, no double-term.
+        """
+        sub_addr = self._sub_endpoints.pop(node_id, None)
+        self._replay_endpoints.pop(node_id, None)
+        self._topics.pop(node_id, None)
+        task = self._sub_tasks.pop(node_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        if sub_addr is not None:
+            self._close_zmq_sockets_for(node_id)
+        self._retry_counts.pop(node_id, None)
 
     def stop(self) -> None:
         """Signal stop, cancel tasks, close ZMQ sockets. No loop dependency.

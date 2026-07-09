@@ -67,3 +67,13 @@ class MetricsStore:
         """Return all node IDs currently in the store."""
         with self._lock:
             return list(self._data.keys())
+
+    def remove(self, node_id: str) -> None:
+        """Drop a node's entire metric dict.
+
+        Used when a server is removed from the balancer pool
+        (``DataStore.remove_servers``) so stale metrics for a gone replica
+        don't linger and pollute routing scores. O(1).
+        """
+        with self._lock:
+            self._data.pop(node_id, None)

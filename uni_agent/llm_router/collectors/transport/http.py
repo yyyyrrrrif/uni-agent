@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 
@@ -46,7 +46,12 @@ class HTTPTransport(Transport):
         self._client = httpx.AsyncClient(timeout=self._http_timeout)
         try:
             while True:
-                coros = {nid: self._client.get(url) for nid, url in self._endpoints.items()}
+                # Snapshot keys so a concurrent add_endpoint/remove_endpoint
+                # mutating self._endpoints from another thread doesn't raise
+                # "dictionary changed size during iteration" mid-poll. A
+                # newly-added endpoint joins on the next loop tick (≤ one
+                # ``interval`` of latency); a removed one stops now.
+                coros = {nid: self._client.get(url) for nid, url in list(self._endpoints.items())}
                 responses = await asyncio.gather(*coros.values(), return_exceptions=True)
                 for nid, resp in zip(coros.keys(), responses, strict=False):
                     if isinstance(resp, Exception):
@@ -69,6 +74,29 @@ class HTTPTransport(Transport):
                 except Exception as exc:
                     # May fail if called outside an async context (e.g. GC finalizer)
                     logger.debug("HTTPTransport: aclose failed during cleanup: %s", exc)
+
+    # ── Dynamic endpoint management ─────────────────────────────────────
+
+    def add_endpoint(self, node_id: str, endpoint: Any) -> None:
+        """Register a new endpoint — it joins the next poll tick.
+
+        ``endpoint`` is the raw ``ip:port`` address (same form ``__init__``
+        accepts); it is parsed into ``http://{ip:port}/metrics`` here.
+        Synchronous dict mutation is safe against the poll loop's
+        ``list(self._endpoints.items())`` snapshot. The new endpoint is first
+        polled on the next loop iteration (≤ one ``interval`` latency).
+        """
+        self._endpoints[node_id] = f"http://{endpoint}/metrics"
+
+    def remove_endpoint(self, node_id: str) -> None:
+        """Stop polling an endpoint — drop it from the next snapshot.
+
+        Any in-flight request this tick is left to finish (its response is
+        discarded by the loop since the id is no longer in the snapshot).
+        No per-endpoint protocol resource to close — the shared
+        ``httpx.AsyncClient`` is closed once in ``subscribe``'s finally.
+        """
+        self._endpoints.pop(node_id, None)
 
     def stop(self) -> None:
         """No protocol-level resources to close here.

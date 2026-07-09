@@ -255,6 +255,43 @@ class TestServerPoolMutations:
         balancer.remove_servers(["s999"])
         assert set(balancer.get_all_servers()) == {"s0"}
 
+    def test_b20_add_servers_skips_provider_when_no_endpoints(self):
+        """
+        Feature: add_servers only forwards to provider when endpoints resolve
+        Description: add_servers with string handles (no get_server_address)
+        Expectation: pool grows; provider.add_servers NOT called (non-actor
+                     handles skip discovery → empty endpoint dicts → no-op)
+        """
+        balancer = _make_balancer({"s0": "h0"})
+        balancer.add_servers({"s1": "h1"})
+        assert set(balancer.get_all_servers()) == {"s0", "s1"}
+        assert balancer._provider.added_servers == []
+
+    def test_b21_remove_servers_drives_provider_and_store(self):
+        """
+        Feature: remove_servers forwards to provider.remove_servers + store.remove_servers
+        Description: remove_servers(["s0"]) on a two-server balancer
+        Expectation: provider got ["s0"]; pool lost s0; sticky cleared.
+                     (The balancer's _store is the real singleton DataStore here
+                     — its remove_servers is exercised via the live collectors
+                     integration test, not asserted against the singleton here.)
+        """
+        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
+        balancer.remove_servers(["s0"])
+        assert balancer._provider.removed_servers == [["s0"]]
+        assert set(balancer.get_all_servers()) == {"s1"}
+
+    def test_b22_remove_servers_unknown_id_still_drives_provider(self):
+        """
+        Feature: removing an unknown id still forwards (idempotent downstream)
+        Description: remove_servers(["s999"]) on a one-server balancer
+        Expectation: provider received ["s999"]; pool unchanged
+        """
+        balancer = _make_balancer({"s0": "h0"})
+        balancer.remove_servers(["s999"])
+        assert balancer._provider.removed_servers == [["s999"]]
+        assert set(balancer.get_all_servers()) == {"s0"}
+
 
 # ============================================================
 # 5.3A end-to-end flows (balancer directly, route() mocked)
@@ -335,6 +372,14 @@ class _MetricsProvider:
         pass
 
     def stop(self):
+        pass
+
+    def add_servers(self, server_addresses, kv_event_endpoints):
+        """No-op for the sticky e2e fake — it holds static metrics, no collectors."""
+        pass
+
+    def remove_servers(self, server_ids):
+        """No-op for the sticky e2e fake — clearing its static metrics dict isn't needed."""
         pass
 
     def get_metrics(self, replica_id):

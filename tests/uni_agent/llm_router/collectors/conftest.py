@@ -150,3 +150,96 @@ def vllm_service(vllm_kv_service):
     being enabled on the same server has no effect on polling tests.
     """
     return vllm_kv_service
+
+
+# ── Second vLLM server (dynamic-add/remove tests) ───────────────────────
+#
+# A separate vLLM process on distinct ports so tests can exercise
+# CollectorProvider.add_servers / remove_servers against a *real* server the
+# provider didn't know about at construction time — mirroring elastic
+# scale-out in production. Kept session-scoped (one extra model load) and
+# skipped if GPU/vLLM isn't available, like vllm_kv_service.
+
+VLLM_PORT_2 = int(os.environ.get("VLLM_PORT_2", "8010"))
+NODE_ID_2 = f"{VLLM_HOST}:{VLLM_PORT_2}"
+ZMQ_SUB_PORT_2 = int(os.environ.get("ZMQ_SUB_PORT_2", "5557"))
+ZMQ_REPLAY_PORT_2 = int(os.environ.get("ZMQ_REPLAY_PORT_2", "5558"))
+
+
+@pytest.fixture(scope="session")
+def vllm_kv_service_2():
+    """Start a second vLLM server with ZMQ KV events (distinct ports).
+
+    Distinct ports from ``vllm_kv_service`` so both can run concurrently in
+    one session. Yields ``NODE_ID_2`` (``"host:port"``).  Skipped (not
+    failed) if the server doesn't come up.
+    """
+    kv_events_config = json.dumps(
+        {
+            "enable_kv_cache_events": True,
+            "publisher": "zmq",
+            "topic": "kv-events",
+            "endpoint": f"tcp://*:{ZMQ_SUB_PORT_2}",
+            "replay_endpoint": f"tcp://*:{ZMQ_REPLAY_PORT_2}",
+        }
+    )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        VLLM_MODEL,
+        "--host",
+        VLLM_HOST,
+        "--port",
+        str(VLLM_PORT_2),
+        "--trust-remote-code",
+        "--tensor_parallel_size",
+        "2",
+        "--dtype",
+        "bfloat16",
+        "--gpu_memory_utilization",
+        "0.6",
+        "--max-model-len",
+        "8192",
+        "--override_generation_config",
+        '{"temperature": 0.8, "top_k": -1, "top_p": 0.9, "repetition_penalty": 1.0, "max_new_tokens": 4096}',
+        "--kv-events-config",
+        kv_events_config,
+    ]
+
+    proc = subprocess.Popen(cmd)
+
+    metrics_url = f"http://{NODE_ID_2}/metrics"
+    max_wait = 360
+    deadline = time.time() + max_wait
+    ready = False
+
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(metrics_url, timeout=5.0)
+            if resp.status_code == 200:
+                ready = True
+                break
+        except (httpx.ConnectError, httpx.TimeoutException):
+            pass
+        time.sleep(3)
+
+    if not ready:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        pytest.skip(f"vLLM server #2 for {VLLM_MODEL} did not become ready within {max_wait}s")
+
+    yield NODE_ID_2
+
+    proc.send_signal(signal.SIGTERM)
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()

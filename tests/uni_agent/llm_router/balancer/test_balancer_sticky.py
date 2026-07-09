@@ -36,6 +36,14 @@ class _MetricsProvider:
     def stop(self):
         pass
 
+    def add_servers(self, server_addresses, kv_event_endpoints):
+        """No-op for the sticky e2e fake — it holds static metrics, no collectors."""
+        pass
+
+    def remove_servers(self, server_ids):
+        """No-op for the sticky e2e fake — clearing its static metrics dict isn't needed."""
+        pass
+
     def get_metrics(self, replica_id):
         return dict(self._metrics.get(replica_id, {}))
 

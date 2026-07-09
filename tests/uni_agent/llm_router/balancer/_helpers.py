@@ -41,6 +41,11 @@ class FakeDataStore:
     def get_retained_occupancy(self, replica_id):
         return None
 
+    def remove_servers(self, server_ids):
+        """Stand-in for ``DataStore.remove_servers`` — drop the replicas' metrics."""
+        for sid in server_ids:
+            self._metrics.pop(sid, None)
+
 
 class _FakeCollectorProvider:
     """Stand-in for ``CollectorProvider`` — a pure lifecycle stub.
@@ -48,7 +53,9 @@ class _FakeCollectorProvider:
     The provider only constructs and starts/stops collectors; routing reads
     metrics from ``DataStore`` (here ``FakeDataStore``), not from the provider.
     So this fake just records that ``start()`` ran so ``test_b03`` /
-    ``get_status`` can assert the lifecycle was driven.
+    ``get_status`` can assert the lifecycle was driven. ``add_servers`` /
+    ``remove_servers`` record their args so dynamic-endpoint tests can assert
+    the provider was wired into ``add_servers``/``remove_servers``.
     """
 
     def __init__(self, collectors_config, collection_names, server_addresses=None, kv_event_endpoints=None):
@@ -58,12 +65,20 @@ class _FakeCollectorProvider:
         self.kv_event_endpoints = kv_event_endpoints
         self.started = False
         self.stopped = False
+        self.added_servers: list[tuple[dict, dict]] = []
+        self.removed_servers: list[list[str]] = []
 
     def start(self):
         self.started = True
 
     def stop(self):
         self.stopped = True
+
+    def add_servers(self, server_addresses, kv_event_endpoints):
+        self.added_servers.append((dict(server_addresses), dict(kv_event_endpoints)))
+
+    def remove_servers(self, server_ids):
+        self.removed_servers.append(list(server_ids))
 
 
 def _router_config(weight: float = 1.0):

@@ -118,6 +118,23 @@ class DataStore:
         """
         self._kv.clear_replica(node_id)
 
+    def remove_servers(self, server_ids: list[str]) -> None:
+        """Clear all metric + kv data for removed servers.
+
+        Called by ``KVCAwareBalancer.remove_servers`` after the collectors
+        stop, so a replica going away doesn't leave its stale metrics (which
+        would otherwise keep feeding routing scores until overwritten) or
+        retained kv blocks in the store. Per ``server_id``: drop its metrics
+        dict (``MetricsStore.remove``) and clear its retained blocks
+        (``KVCacheStore.clear_replica`` via ``clear_kv_node``).
+
+        ``block_size`` is global (learned from the first event) and left
+        untouched — it doesn't key off any single replica.
+        """
+        for sid in server_ids:
+            self._metrics.remove(sid)
+            self.clear_kv_node(sid)
+
     def get_kv_block_count(self) -> int:
         """Return the number of unique block hashes currently cached."""
         return len(self._kv.replicas_by_block)

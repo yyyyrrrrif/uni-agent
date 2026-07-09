@@ -7,6 +7,7 @@ import logging
 import threading
 from collections import defaultdict
 from concurrent.futures import Future
+from typing import Any
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
 from uni_agent.llm_router.collectors.transport.base import Transport
@@ -112,6 +113,16 @@ class Collector:
             self._transport.subscribe(handler),
             self._loop,
         )
+
+    # ── Dynamic endpoint management ─────────────────────────────────────
+
+    def add_endpoint(self, node_id: str, endpoint: Any) -> None:
+        """Forward to the transport — start collecting a new endpoint."""
+        self._transport.add_endpoint(node_id, endpoint)
+
+    def remove_endpoint(self, node_id: str) -> None:
+        """Forward to the transport — stop collecting an endpoint."""
+        self._transport.remove_endpoint(node_id)
 
     def _write_kv_update(self, update: KVCacheUpdate) -> None:
         """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""

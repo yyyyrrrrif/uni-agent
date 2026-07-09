@@ -61,27 +61,30 @@ class KVCAwareBalancer:
             raise ValueError(f"server handle returned invalid max_num_seqs={value}")
         return value
 
-    def _init_provider(self) -> None:
-        """Resolve per-server endpoints from Ray actor handles and init the provider.
+    @staticmethod
+    def _resolve_endpoints(servers: dict[str, Any]) -> tuple[dict[str, str], dict[str, list[str]]]:
+        """Resolve per-server endpoints from Ray actor handles.
 
-        Iterates ``self._servers``, calling ``get_server_address.remote()`` and
-        ``get_kv_events_endpoints.remote()`` on each handle to dynamically
-        discover the Prometheus polling addresses and ZMQ kv-event endpoints.
-        The resolved addresses are then passed to ``CollectorProvider``, which
-        routes them to the appropriate collector type at creation time.
+        For each handle: ``get_server_address.remote()`` → ``(ip, port)``
+        assembled into the HTTP ``ip:port`` form, and
+        ``get_kv_events_endpoints.remote()`` → the ZMQ 4-element list (None
+        → no kv-events, skipped, e.g. mc-off groups).
 
         Handles that are not real Ray actors (e.g. plain strings passed by
         unit tests or bring-up stubs) have no ``get_server_address`` remote;
         for those, dynamic discovery is skipped and collectors fall back to
         their configured/default endpoints.
+
+        Returns ``(server_addresses, kv_event_endpoints)``. Shared by
+        ``_init_provider`` (bulk, at construction) and ``add_servers``
+        (incremental, on elastic scale-out).
         """
-        collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
         server_addresses: dict[str, str] = {}
         kv_event_endpoints: dict[str, list[str]] = {}
         addr_futures = []
         ep_futures = []
         active_replicas = []
-        for replica_id, handle in self._servers.items():
+        for replica_id, handle in servers.items():
             if not hasattr(handle, "get_server_address"):
                 logger.warning(
                     f"server '{replica_id}' handle has no get_server_address remote "
@@ -100,6 +103,16 @@ class KVCAwareBalancer:
                 if endpoints is None:
                     continue
                 kv_event_endpoints[replica_id] = endpoints
+        return server_addresses, kv_event_endpoints
+
+    def _init_provider(self) -> None:
+        """Resolve per-server endpoints (bulk) and start the provider.
+
+        Delegates endpoint discovery to ``_resolve_endpoints`` over the
+        full initial pool, then constructs and starts ``CollectorProvider``.
+        """
+        collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
+        server_addresses, kv_event_endpoints = self._resolve_endpoints(self._servers)
         self._provider = CollectorProvider(
             self._config.collector,
             collection_names,
@@ -164,23 +177,34 @@ class KVCAwareBalancer:
         return server_id, self._servers[server_id]
 
     def add_servers(self, servers: dict[str, Any]) -> None:
-        """Bulk-add servers to the pool.
+        """Bulk-add servers to the pool and start collecting from them.
 
-        Note: the provider is keyed by the endpoint addresses resolved at
-        init time, not by this pool, so it is not touched here.
+        Beyond growing ``self._servers``, resolves each new server's endpoints
+        (same Ray-handle discovery as ``_init_provider``) and feeds them to the
+        provider so the HTTP/ZMQ transports begin polling/subscribing the new
+        replica. Servers whose handles aren't real Ray actors are still added
+        to the pool but skip endpoint discovery (init-time fallback).
         """
         for sid, handle in servers.items():
             self._servers[sid] = handle
+        server_addresses, kv_event_endpoints = self._resolve_endpoints(servers)
+        if server_addresses or kv_event_endpoints:
+            self._provider.add_servers(server_addresses, kv_event_endpoints)
 
     def remove_servers(self, server_ids: list[str]) -> None:
-        """Bulk-remove servers from the pool (provider is not keyed by the pool).
+        """Bulk-remove servers: stop collecting, drop the pool entry, clear data.
 
-        Also invalidates every sticky binding pointing at a removed server so a
-        subsequent ``acquire_server`` for a bound conversation doesn't try to
-        short-circuit to a dead replica (the strategy would reject it and fall
-        back to combined scoring anyway, but clearing early keeps the table
-        clean and the logs honest).
+        Three things per removal, in order:
+        1. ``provider.remove_servers`` — stop HTTP/ZMQ collection for the ids
+           (so a gone replica's endpoint stops being polled/retried).
+        2. drop the pool entry + invalidate sticky bindings pointing at it
+           (so a subsequent ``acquire_server`` for a bound conversation
+           doesn't short-circuit to a dead replica).
+        3. ``store.remove_servers`` — clear the replica's stale metric + kv
+           data so it stops feeding routing scores.
         """
+        self._provider.remove_servers(server_ids)
         for sid in server_ids:
             self._servers.pop(sid, None)
             self._sticky.invalidate_replica(sid)
+        self._store.remove_servers(server_ids)
