@@ -24,6 +24,16 @@ from uni_agent.llm_router.config.collector import CollectorConfig
 _DEFAULT_COLLECTOR = CollectorConfig()
 _DEFAULT_CACHE_STORE = CacheStoreConfig()
 
+# Conditional-migration knobs forwarded verbatim from YAML into KVCAwareConfig.
+_MIGRATE_KEYS = (
+    "migrate_max_tokens",
+    "migrate_max_turns",
+    "imbalance_over_factor",
+    "imbalance_min_idle",
+    "imbalance_idle_load",
+    "imbalance_gap",
+)
+
 
 @dataclass(repr=False)
 class KVCAwareConfig:
@@ -41,12 +51,37 @@ class KVCAwareConfig:
             table. Bound conversations stay affinity-bound to their replica
             until it is removed or evicted by LRU. Default 10000 (mirrors verl
             ``DEFAULT_ROUTING_CACHE_SIZE``).
+        migrate_max_tokens: Conditional-migration gate (long-tail mitigation),
+            default OFF (``0``). When > 0, on an overloaded + imbalanced pool the
+            balancer migrates the *cheapest* request on the straggler replica —
+            the one with the fewest accumulated tokens (``len(prompt_ids)``, i.e.
+            least prefix KV to re-prefill), and only if that request's
+            ``tokens <= migrate_max_tokens`` — to the lightest replica. Long
+            (large-token) conversations are never moved: their 50-100K-token
+            prefix costs more to rebuild than the rebalance saves (PR
+            verl#6533's KV-aware finding).
+        migrate_max_turns: Optional *secondary* gate on the same migration,
+            default OFF (``0`` = not enforced). When > 0, the migrated request
+            must additionally satisfy ``turn <= migrate_max_turns``. ``turn`` is
+            always tracked and logged for comparison with the token signal even
+            when this gate is off.
+        imbalance_over_factor: (A) straggler if ``bound_load >= mean_load × this``.
+        imbalance_min_idle: (B) need ``>=`` this many near-idle replicas (headroom).
+        imbalance_idle_load: a replica with ``load <= this`` counts as near-idle.
+        imbalance_gap: (C) require ``bound_load - min_load >= this``.
     """
 
     strategies: list[StrategyConfig]  # required, no default
     collector: CollectorConfig = field(default_factory=lambda: _DEFAULT_COLLECTOR)
     cache_store: CacheStoreConfig = field(default_factory=lambda: _DEFAULT_CACHE_STORE)
     sticky_max_size: int = 10000
+    # ── Conditional migration / imbalance gate (default OFF) ──────────────
+    migrate_max_tokens: int = 0  # primary cost gate + enable switch (0 = off)
+    migrate_max_turns: int = 0  # optional secondary gate (0 = not enforced)
+    imbalance_over_factor: float = 1.5
+    imbalance_min_idle: int = 2
+    imbalance_idle_load: float = 0.2
+    imbalance_gap: float = 0.15
 
     @classmethod
     def from_config(cls, cfg: DictConfig | dict) -> KVCAwareConfig:
@@ -109,10 +144,20 @@ class KVCAwareConfig:
             collector_cfg = config_obj.get("collector") or CollectorConfig()
             cache_store_cfg = config_obj.get("cache_store") or CacheStoreConfig()
             sticky_max_size = config_obj.get("sticky_max_size", 10000)
+            migrate_kwargs = {
+                k: config_obj[k]
+                for k in _MIGRATE_KEYS
+                if k in config_obj and config_obj[k] is not None
+            }
         else:
             collector_cfg = getattr(config_obj, "collector", None) or CollectorConfig()
             cache_store_cfg = getattr(config_obj, "cache_store", None) or CacheStoreConfig()
             sticky_max_size = getattr(config_obj, "sticky_max_size", 10000)
+            migrate_kwargs = {
+                k: getattr(config_obj, k)
+                for k in _MIGRATE_KEYS
+                if getattr(config_obj, k, None) is not None
+            }
 
         # ── Step 2: parse strategies (polymorphic list) ────────────
         if strategies_raw is None:
@@ -125,6 +170,7 @@ class KVCAwareConfig:
             collector=collector_cfg,
             cache_store=cache_store_cfg,
             sticky_max_size=int(sticky_max_size),
+            **migrate_kwargs,
         )
         result.validate()
         return result
@@ -144,6 +190,20 @@ class KVCAwareConfig:
 
         if self.sticky_max_size <= 0:
             errors.append(f"sticky_max_size must be > 0, got {self.sticky_max_size}")
+
+        # Migration knobs (only active when migrate_max_tokens > 0).
+        if self.migrate_max_tokens < 0:
+            errors.append(f"migrate_max_tokens must be >= 0, got {self.migrate_max_tokens}")
+        if self.migrate_max_turns < 0:
+            errors.append(f"migrate_max_turns must be >= 0, got {self.migrate_max_turns}")
+        if self.imbalance_over_factor < 1.0:
+            errors.append(f"imbalance_over_factor must be >= 1.0, got {self.imbalance_over_factor}")
+        if self.imbalance_min_idle < 1:
+            errors.append(f"imbalance_min_idle must be >= 1, got {self.imbalance_min_idle}")
+        if not 0 <= self.imbalance_idle_load <= 1:
+            errors.append(f"imbalance_idle_load must be in [0, 1], got {self.imbalance_idle_load}")
+        if self.imbalance_gap < 0:
+            errors.append(f"imbalance_gap must be >= 0, got {self.imbalance_gap}")
 
         if errors:
             raise ConfigError("; ".join(errors))

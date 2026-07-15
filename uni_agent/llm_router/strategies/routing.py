@@ -31,12 +31,16 @@ class RoutingStrategy(Protocol):
         replicas: list[Any],
         request_id: str | None = None,
         sticky_table: Any = None,
+        turn: int | None = None,
     ) -> list[float]:
         """Score each replica. Larger is better; negatives are allowed.
 
         ``request_id`` + ``sticky_table`` enable sticky-session short-circuit:
         a strategy may return a pre-built score list that places the bound
         replica first when it is not overloaded (see ``KVCacheAwareStrategy``).
+        ``turn`` is the balancer's per-``request_id`` route count (1 on the
+        first turn), a proxy for accumulated prefix KV used by the migration
+        gate; strategies that ignore it should accept the kwarg and proceed.
         Strategies that ignore stickiness should accept the kwargs and proceed
         with their own scoring.
         """
@@ -55,6 +59,7 @@ def route(
     replicas: list[Any],
     request_id: str | None = None,
     sticky_table: Any = None,
+    turn: int | None = None,
 ) -> list[str]:
     """Return replica ids ranked best-first.
 
@@ -69,6 +74,9 @@ def route(
         replicas: ``[ReplicaInfo, ...]`` — candidate replicas.
         request_id: session id for sticky-session routing (may be ``None``).
         sticky_table: ``StickySessionTable`` for sticky lookups (may be ``None``).
+        turn: balancer's per-``request_id`` route count (1-based); proxy for
+            accumulated prefix KV, consumed by the migration gate (may be
+            ``None``).
 
     Returns:
         Replica ids sorted by total score, best first. Falls back to random
@@ -91,6 +99,7 @@ def route(
                 replicas,
                 request_id,
                 sticky_table,
+                turn,
             )
             if len(scores) != n:
                 raise ValueError(f"{name}.score() returned {len(scores)} scores, expected {n}")

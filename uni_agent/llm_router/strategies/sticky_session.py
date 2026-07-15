@@ -45,7 +45,12 @@ class StickySessionTable:
         if max_size <= 0:
             raise ValueError(f"max_size must be > 0, got {max_size}")
         self._max_size = int(max_size)
-        self._table: LRUCache[str, str] = LRUCache(maxsize=self._max_size)
+        # request_id → (replica_id, turn, tokens). ``turn`` is the balancer's
+        # per-request route count (kept for logging / comparison); ``tokens`` is
+        # the request's accumulated prompt length (len(prompt_ids)), the direct
+        # migration-cost signal used to pick the cheapest request to move off an
+        # overloaded replica.
+        self._table: LRUCache[str, tuple[str, int, int]] = LRUCache(maxsize=self._max_size)
         logger.info(f"StickySessionTable created: max_size={self._max_size}")
 
     @property
@@ -62,16 +67,49 @@ class StickySessionTable:
         pattern.
         """
         if request_id in self._table:
-            return self._table[request_id]
+            return self._table[request_id][0]
         return None
 
-    def put(self, request_id: str, replica_id: str) -> None:
-        """Bind / refresh ``request_id → replica_id``.
+    def get_turn(self, request_id: str) -> int | None:
+        """Return the stored turn (route count) for a binding, or ``None``."""
+        if request_id in self._table:
+            return self._table[request_id][1]
+        return None
+
+    def get_tokens(self, request_id: str) -> int | None:
+        """Return the stored accumulated token count for a binding, or ``None``."""
+        if request_id in self._table:
+            return self._table[request_id][2]
+        return None
+
+    def put(self, request_id: str, replica_id: str, turn: int = 1, tokens: int = 0) -> None:
+        """Bind / refresh ``request_id → (replica_id, turn, tokens)``.
 
         Inserting an existing key refreshes recency and updates the bound
-        replica (e.g. when overload-fallback routed to a different server).
+        replica (e.g. when overload-fallback or migration routed elsewhere), the
+        turn, and the accumulated ``tokens``. ``turn``/``tokens`` default so
+        legacy two/three-arg callers keep working.
         """
-        self._table[request_id] = replica_id
+        self._table[request_id] = (replica_id, int(turn), int(tokens))
+
+    def cheapest_on(self, replica_id: str) -> tuple[str, int, int] | None:
+        """Return ``(request_id, turn, tokens)`` of the lowest-**tokens** binding there.
+
+        Used by the balancer's migration gate to pick the cheapest request to
+        move off an overloaded replica (fewest accumulated tokens = least prefix
+        KV to re-prefill). ``turn`` is carried for logging/comparison only. Ties
+        break on the first-seen request_id. Returns ``None`` if no binding points
+        at ``replica_id``. O(n) scan — only called on the rare migration trigger.
+        """
+        best: tuple[str, int, int] | None = None
+        for rid, (sid, turn, tokens) in self._table.items():
+            if sid == replica_id and (best is None or tokens < best[2]):
+                best = (rid, turn, tokens)
+        return best
+
+    def remove(self, request_id: str) -> None:
+        """Drop a single request_id's binding (alias of :meth:`invalidate`)."""
+        self._table.pop(request_id, None)
 
     def invalidate(self, request_id: str) -> None:
         """Drop a single request_id's binding (e.g. stale replica hit)."""
@@ -84,7 +122,7 @@ class StickySessionTable:
         doesn't leave sticky entries routing into the void. O(n) in table size
         — acceptable for the rare elastic-removal path.
         """
-        stale = [rid for rid, sid in self._table.items() if sid == replica_id]
+        stale = [rid for rid, (sid, _turn, _tokens) in self._table.items() if sid == replica_id]
         for rid in stale:
             self._table.pop(rid, None)
         if stale:

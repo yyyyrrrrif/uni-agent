@@ -26,6 +26,7 @@ from uni_agent.llm_router.strategies import (
     StrategyRegistry,
     route,
 )
+from uni_agent.llm_router.strategies.kvc_aware import replica_load_from_store
 
 logger = get_router_logger("balancer")
 
@@ -45,8 +46,10 @@ class KVCAwareBalancer:
             if hasattr(strategy, "set_capacity"):
                 strategy.set_capacity(max_num_seqs)
         logger.info(f"KVCAwareBalancer: injected max_num_seqs={max_num_seqs} from server handle")
+        self._max_num_seqs = max_num_seqs  # reused by the migration gate's load formula
         self._servers: dict[str, Any] = dict(servers)
         self._route_calls = 0
+        self._migrations = 0
         self._sticky = StickySessionTable(max_size=self._config.sticky_max_size)
         # _store before _init_manager: real env's _init_manager only wires the
         # collector manager, but tests inject a fake store via _init_manager, so
@@ -127,6 +130,7 @@ class KVCAwareBalancer:
             "manager": type(self._manager).__name__,
             "strategies": [{"type": type(s).__name__, "weight": w} for s, w in self._strategies],
             "route_calls": self._route_calls,
+            "migrations": self._migrations,
             "sticky_size": len(self._sticky),
         }
 
@@ -142,13 +146,26 @@ class KVCAwareBalancer:
 
         The ``request_id`` and the sticky-session table are forwarded to
         ``route()`` so strategies can short-circuit to a bound, non-overloaded
-        replica. After a ranking is chosen, the binding is refreshed so the
-        next turn of the same ``request_id`` stays affinity-bound (or, when a
-        sticky replica was overloaded and routing fell back, rebinds to the
-        new choice).
+        replica. Before routing, the conditional-migration gate may run (when
+        ``migrate_max_tokens > 0``): if this request's bound replica is an
+        overloaded straggler, the *cheapest* request pinned there (fewest
+        accumulated tokens) is rebound to the lightest replica (see
+        :meth:`_maybe_migrate`). After a ranking is chosen, the binding is
+        refreshed (with the request's turn count and token length) so the next
+        turn of the same ``request_id`` stays affinity-bound, or follows a
+        migration that moved it.
         """
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
+        # turn: LB's per-request route count (kept for logging/comparison).
+        # tokens: accumulated prompt length = the migration-cost signal. Both are
+        # sourced/updated from the sticky table so a migrated request carries
+        # them to its new replica.
+        turn = (self._sticky.get_turn(request_id) or 0) + 1
+        tokens = len(prompt_ids) if prompt_ids is not None else 0
+        # Conditional migration: peel the cheapest request off an overloaded,
+        # imbalanced straggler before routing (may rebind this or another req).
+        self._maybe_migrate(request_id, turn, tokens)
         ranking = route(
             self._strategies,
             prompt_ids,
@@ -156,15 +173,103 @@ class KVCAwareBalancer:
             replicas,
             request_id,
             self._sticky,
+            turn,
         )
         if not ranking:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
-        self._sticky.put(request_id, server_id)
+        self._sticky.put(request_id, server_id, turn, tokens)
         logger.info(
-            f"request={request_id} routed to server={server_id} (ranking={ranking}, pool={list(self._servers)})",
+            f"request={request_id} routed to server={server_id} (turn={turn}, tokens={tokens}, "
+            f"ranking={ranking}, pool={list(self._servers)})",
         )
         return server_id, self._servers[server_id]
+
+    def _maybe_migrate(self, request_id: str, turn: int, tokens: int) -> None:
+        """Migrate the cheapest request off this request's overloaded straggler.
+
+        No-op unless migration is enabled (``migrate_max_tokens > 0``), the
+        request has a sticky binding to an in-pool replica, and a load-capable
+        strategy exists. When the bound replica is a relative straggler with idle
+        headroom (:meth:`_is_imbalanced`), the request pinned to it with the
+        fewest accumulated tokens is rebound to the lightest replica — *if* that
+        request is cheap enough to move: ``tokens <= migrate_max_tokens`` (and,
+        when the optional secondary gate ``migrate_max_turns > 0`` is set, also
+        ``turn <= migrate_max_turns``). The victim may be ``request_id`` itself
+        (if it is the cheapest on the straggler) or another request Y (which
+        follows the new binding on its next turn).
+
+        Zombie bindings (finished conversations still in the table) are handled
+        by construction: the victim is rebound off the straggler, so it is not
+        re-selected next time — the straggler's candidate set peels down toward
+        live cheap requests without needing per-turn release cleanup.
+        """
+        cfg = self._config
+        if cfg.migrate_max_tokens <= 0:
+            return
+        bound = self._sticky.get(request_id)
+        if bound is None or bound not in self._servers:
+            return  # cold start or stale binding — no straggler context
+        loads = {sid: self._replica_load(sid) for sid in self._servers}
+        if not self._is_imbalanced(loads, loads[bound]):
+            return
+        victim = self._sticky.cheapest_on(bound)
+        if victim is None:
+            return
+        victim_id, victim_turn, victim_tokens = victim
+        # The current request's live turn/tokens aren't written back to the table
+        # yet; use the fresher values when it is the victim.
+        if victim_id == request_id:
+            victim_turn, victim_tokens = turn, tokens
+        if victim_tokens > cfg.migrate_max_tokens:
+            return  # cheapest is still too large to move cheaply (protect prefix KV)
+        if cfg.migrate_max_turns > 0 and victim_turn > cfg.migrate_max_turns:
+            return  # optional secondary turn gate
+        target = min(loads, key=loads.get)
+        if target == bound:
+            return  # guard: straggler can't also be the lightest
+        self._sticky.put(victim_id, target, victim_turn, victim_tokens)
+        self._migrations += 1
+        logger.info(
+            f"MIGRATE: cheapest req={victim_id} (tokens={victim_tokens}, turn={victim_turn}) "
+            f"off straggler={bound} (load={loads[bound]:.4f}) → target={target} "
+            f"(load={loads[target]:.4f}); triggered by request={request_id}"
+        )
+
+    def _replica_load(self, replica_id: str) -> float:
+        """Normalized load ∈ [0, 1] for one replica, via the shared formula.
+
+        Thin wrapper over :func:`replica_load_from_store` so the migration gate's
+        imbalance judgment uses the exact same load view as strategy scoring.
+        """
+        return replica_load_from_store(self._store, replica_id, max_num_seqs=self._max_num_seqs)
+
+    def _is_imbalanced(self, loads: dict[str, float], bound_load: float) -> bool:
+        """Whether the pool is skewed enough to justify migrating a young request.
+
+        Relative judgment (not an absolute load threshold): in the long-tail a
+        straggler holds moderate load while peers drain to ~0, which an absolute
+        threshold can miss. True iff ALL hold:
+          (A) straggler:  ``bound_load >= mean_load * imbalance_over_factor``;
+          (B) headroom:   ``>= imbalance_min_idle`` replicas have load
+              ``<= imbalance_idle_load`` (distinguishes a tail — some drained —
+              from uniform overload where every replica is busy);
+          (C) gap:        ``bound_load - min_load >= imbalance_gap``.
+        """
+        vals = list(loads.values())
+        n = len(vals)
+        if n < 2:
+            return False
+        mean_load = sum(vals) / n
+        cfg = self._config
+        if mean_load <= 0 or bound_load < cfg.imbalance_over_factor * mean_load:
+            return False  # (A) bound is not a straggler relative to the fleet
+        n_idle = sum(1 for x in vals if x <= cfg.imbalance_idle_load)
+        if n_idle < cfg.imbalance_min_idle:
+            return False  # (B) no headroom → uniform overload, not a tail
+        if bound_load - min(vals) < cfg.imbalance_gap:
+            return False  # (C) no sufficiently lighter replica
+        return True
 
     def add_servers(self, servers: dict[str, Any]) -> None:
         """Bulk-add servers to the pool.

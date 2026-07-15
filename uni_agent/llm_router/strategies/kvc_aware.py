@@ -35,6 +35,27 @@ def load_normalized(
     return a * float(kv_usage) + b * running_usage + c * waiting_usage
 
 
+def replica_load_from_store(
+    store: DataStore,
+    replica_id: str,
+    *,
+    max_num_seqs: int,
+    weights: tuple[float, float, float] = DEFAULT_LOAD_WEIGHTS,
+) -> float:
+    """Normalized load ∈ [0, 1] for one replica: read kv/running/waiting from the
+    store and apply :func:`load_normalized`.
+
+    The single source of truth for "how loaded is a replica", shared by the
+    strategy's scoring/overload checks and the balancer's migration-gate
+    imbalance judgment — so both see identical load numbers.
+    """
+    m = store.get_metrics(replica_id)
+    kv_usage = store.kv_cache_load(replica_id)
+    running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
+    waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
+    return load_normalized(kv_usage, running, waiting, max_num_seqs=max_num_seqs, weights=weights)
+
+
 class StrategyError(Exception):
     """Strategy construction or scoring error."""
 
@@ -106,6 +127,19 @@ class KVCacheAwareStrategy:
             raise StrategyError("set_capacity() must be called before routing")
         return load_normalized(kv_usage, running, waiting, max_num_seqs=self._max_num_seqs, weights=self.load_weights)
 
+    def _replica_load(self, store: DataStore, replica_id: str) -> float:
+        """Normalized load ∈ [0, 1] for one replica, via the shared formula.
+
+        Delegates to the module-level :func:`replica_load_from_store` (the single
+        source of truth also used by the balancer's migration gate); the only
+        strategy-specific part is the capacity guard.
+        """
+        if self._max_num_seqs is None:
+            raise StrategyError("set_capacity() must be called before routing")
+        return replica_load_from_store(
+            store, replica_id, max_num_seqs=self._max_num_seqs, weights=self.load_weights
+        )
+
     def is_overloaded(
         self,
         store: DataStore,
@@ -117,11 +151,7 @@ class KVCacheAwareStrategy:
         returning session back to its bound replica. Combined scoring never
         consults overload.
         """
-        m = store.get_metrics(replica.replica_id)
-        kv_usage = store.kv_cache_load(replica.replica_id)
-        running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
-        waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-        return self._compute_load(kv_usage, running, waiting) > self.load_threshold
+        return self._replica_load(store, replica.replica_id) > self.load_threshold
 
     def _sticky_shortcut(
         self,
@@ -129,6 +159,7 @@ class KVCacheAwareStrategy:
         replicas: list[ReplicaInfo],
         request_id: str | None,
         sticky_table: Any,
+        turn: int | None,
     ) -> list[float] | None:
         """Return a pre-built score list if a sticky replica should win, else None.
 
@@ -137,6 +168,14 @@ class KVCacheAwareStrategy:
         On win, returns a list with ``STICKY_TOP_SCORE`` at the bound replica's
         index and ``0.0`` elsewhere. On miss / overload / absence, returns
         ``None`` so the caller falls through to combined scoring.
+
+        Note: this strategy is a stateless scorer. Conditional migration (moving
+        the youngest request off an overloaded, imbalanced replica) is decided
+        and applied by the ``KVCAwareBalancer`` before scoring runs — by the
+        time this method sees an overloaded bound replica, any migration has
+        already rebound the affected request, so here overload just falls back
+        to combined scoring exactly as before. ``turn`` is accepted for
+        interface parity but unused by the scorer.
         """
         if not request_id or sticky_table is None:
             return None
@@ -145,12 +184,7 @@ class KVCacheAwareStrategy:
             return None
         for idx, replica in enumerate(replicas):
             if replica.replica_id == sticky_id:
-                m = store.get_metrics(replica.replica_id)
-                kv_usage = store.kv_cache_load(replica.replica_id)
-                running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
-                waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-                load = self._compute_load(kv_usage, running, waiting)
-                if load > self.load_threshold:
+                if self._replica_load(store, replica.replica_id) > self.load_threshold:
                     logger.info(f"score(): STICKY replica={sticky_id} OVERLOADED → fallback to COMBINED scoring")
                     return None
                 logger.info(f"score(): STICKY replica={sticky_id} HIT → short-circuit (top score)")
@@ -167,6 +201,7 @@ class KVCacheAwareStrategy:
         replicas: list[ReplicaInfo],
         request_id: str | None = None,
         sticky_table: Any = None,
+        turn: int | None = None,
     ) -> list[float]:
         """Score each replica. Larger is better.
 
@@ -177,7 +212,7 @@ class KVCacheAwareStrategy:
         if not replicas:
             return []
         # Sticky short-circuit: bound, non-overloaded replica wins outright.
-        shortcut = self._sticky_shortcut(store, replicas, request_id, sticky_table)
+        shortcut = self._sticky_shortcut(store, replicas, request_id, sticky_table, turn)
         if shortcut is not None:
             return shortcut
         effective_prompt_ids = prompt_ids or []

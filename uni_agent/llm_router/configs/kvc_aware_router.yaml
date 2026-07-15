@@ -15,6 +15,31 @@ router_class: uni_agent.llm_router.balancer.KVCAwareBalancer
 # DEFAULT_ROUTING_CACHE_SIZE (verl/verl/workers/rollout/router.py).
 sticky_max_size: 10000
 
+# ── Conditional migration / imbalance gate (long-tail mitigation) ──────────
+# Default OFF: migrate_max_tokens=0 disables migration entirely (pure sticky).
+# When enabled, on an overloaded + relatively-imbalanced pool the balancer
+# rebinds the *cheapest* request on the straggler replica (fewest accumulated
+# tokens = least prefix KV to re-prefill) to the lightest replica. Long
+# (large-token) conversations are never moved. See planning/plan-20.
+#
+# migrate_max_tokens: primary cost gate + enable switch. Only migrate a request
+#   whose accumulated prompt length (len(prompt_ids)) is <= this. 0 = OFF.
+#   Suggested starting point when enabling: ~1-2% of the context cap
+#   (e.g. 2000-4000 for a 128K cap); calibrate from the len(prompt_ids) histogram.
+migrate_max_tokens: 0
+# migrate_max_turns: optional secondary gate. When > 0, the migrated request must
+#   also satisfy turn <= this. turn is always tracked/logged for comparison even
+#   when this gate is 0 (not enforced).
+migrate_max_turns: 0
+# Imbalance judgment (relative, not an absolute load threshold):
+#   (A) straggler:  bound_load >= mean_load * imbalance_over_factor
+#   (B) headroom:   >= imbalance_min_idle replicas with load <= imbalance_idle_load
+#   (C) gap:        bound_load - min_load >= imbalance_gap
+imbalance_over_factor: 1.5
+imbalance_min_idle: 2
+imbalance_idle_load: 0.2
+imbalance_gap: 0.15
+
 strategies:
     kvc_aware_strategy:
         weight: 1.0
