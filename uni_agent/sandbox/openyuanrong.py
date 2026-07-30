@@ -96,6 +96,20 @@ class _OpenyuanrongShell:
             pass
 
 
+def _to_openyuanrong_image(image: str) -> str:
+    """Map the provider-agnostic SWE-bench image ref to the openyuanrong registry.
+
+    ``preprocess`` writes the canonical open-source ref
+    ``swebench/sweb.eval.x86_64.<id>``; openyuanrong serves the same instance
+    under a fully-qualified registry path with a ``:v2`` tag. Unknown prefixes
+    (``python:3.12``, or an already fully-qualified openyuanrong image) are
+    passed through unchanged -- the SDK resolves short names itself.
+    """
+    if image.startswith("swebench/"):
+        return image.replace("swebench/", "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/") + ":v2"
+    return image
+
+
 @register_sandbox("openyuanrong")
 class OpenyuanrongSandbox(Sandbox):
     """Command execution via remote sandbox."""
@@ -140,7 +154,9 @@ class OpenyuanrongSandbox(Sandbox):
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> OpenyuanrongSandbox:
-        return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+        return cls(
+            image=_to_openyuanrong_image(config.image), runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs
+        )
 
     # ----- control plane -----
     async def start(self) -> None:
@@ -208,6 +224,19 @@ class OpenyuanrongSandbox(Sandbox):
     def _is_timeout_error(self, exc: BaseException) -> bool:
         return type(exc).__name__ == "CommandTimeoutError" or super()._is_timeout_error(exc)
 
+    # SWE-bench eval images ship the project + its deps in a ``testbed`` conda env,
+    # activated from ``~/.bashrc``. The SDK's ``shells.create`` starts an interactive
+    # bash that reads ``.bashrc``, but the ``conda activate testbed`` line does not
+    # reliably take effect (PATH stays at base, ``CONDA_DEFAULT_ENV`` empty) — so the
+    # shell resolves ``python`` to ``/opt/miniconda3/bin/python`` (base, no project
+    # deps). Activate explicitly after create; tolerate non-SWE images (no conda / no
+    # ``testbed`` env) by swallowing errors.
+    _CONDA_ACTIVATE_INIT = (
+        "source /opt/conda/etc/profile.d/conda.sh 2>/dev/null"
+        " || source /opt/miniconda3/etc/profile.d/conda.sh 2>/dev/null;"
+        " conda activate testbed 2>/dev/null || true"
+    )
+
     async def open_shell(
         self,
         *,
@@ -217,7 +246,9 @@ class OpenyuanrongSandbox(Sandbox):
         """Return a long-lived SDK shell (cwd/env persist across ``run`` calls)."""
         sb = self._require()
         shell = await sb.shells.create(cwd=cwd, envs=env)
-        return _OpenyuanrongShell(shell)
+        handle = _OpenyuanrongShell(shell)
+        await handle.run(self._CONDA_ACTIVATE_INIT, timeout=30)
+        return handle
 
     # ----- data plane: one-shot shell (stdout/stderr merged via pty) -----
     async def _exec(
@@ -246,6 +277,33 @@ class OpenyuanrongSandbox(Sandbox):
                     await shell.kill()
                 except Exception:
                     pass
+
+    # ----- data plane: native file channel (SDK files.write/read) -----
+    # Override the base64-over-exec floor in Sandbox.write_file/read_file. Editing
+    # large files (e.g. sympy/combinatorics/perm_groups.py, ~10k+ lines) via the
+    # exec channel base64-encodes the whole file into one shell command that times
+    # out even at 300s. The SDK's Filesystem.write routes large payloads through
+    # copy_from_local (no hex bloat), so str_replace_editor no longer stalls.
+    async def read_file(self, path: str) -> bytes:
+        sb = self._require()
+        data = await asyncio.to_thread(sb.files.read, path, "bytes")
+        return bytes(data)
+
+    async def write_file(self, path: str, content: bytes | str) -> None:
+        sb = self._require()
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        # SDK write needs the parent dir to exist; ensure it (no-op if present).
+        parent = os.path.dirname(path)
+        if parent:
+            try:
+                await asyncio.to_thread(sb.files.make_dir, parent)
+            except Exception:
+                # make_dir may raise for existing dirs on some SDK versions; ignore.
+                pass
+        try:
+            await asyncio.to_thread(sb.files.write, path, data)
+        except Exception as exc:  # SDK RuntimeError surfaces {error} from the server
+            raise RuntimeError(f"write_file {path!r} failed: {exc}") from exc
 
     # ----- port forwarding / reverse tunnel helpers -----
     def get_port_url(self, port: int) -> str:
