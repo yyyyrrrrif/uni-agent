@@ -97,6 +97,19 @@ class _OpenyuanrongShell:
             pass
 
 
+def _to_openyuanrong_image(image: str) -> str:
+    """Map the provider-agnostic SWE-bench image ref to the openyuanrong registry.
+
+    ``preprocess`` writes the canonical open-source ref
+    ``swebench/sweb.eval.x86_64.<id>``; openyuanrong serves the same instance
+    under a fully-qualified registry path with a ``:v2`` tag. Unknown prefixes
+    (``python:3.12``, or an already fully-qualified openyuanrong image) are
+    passed through unchanged -- the SDK resolves short names itself.
+    """
+    if image.startswith("swebench/"):
+        return image.replace("swebench/", "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/") + ":v2"
+    return image
+
 @register_sandbox("openyuanrong")
 class OpenyuanrongSandbox(Sandbox):
     """Command execution via remote sandbox."""
@@ -141,7 +154,9 @@ class OpenyuanrongSandbox(Sandbox):
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> OpenyuanrongSandbox:
-        return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+        return cls(
+            image=_to_openyuanrong_image(config.image), runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs
+        )
 
     # ----- public: control plane -----
     async def start(self) -> None:
@@ -194,6 +209,12 @@ class OpenyuanrongSandbox(Sandbox):
         except Exception:
             return False
 
+    _CONDA_ACTIVATE_INIT = (
+        "source /opt/conda/etc/profile.d/conda.sh 2>/dev/null"
+        " || source /opt/miniconda3/etc/profile.d/conda.sh 2>/dev/null;"
+        " conda activate testbed 2>/dev/null || true"
+    )
+
     async def open_shell(
         self,
         *,
@@ -203,7 +224,9 @@ class OpenyuanrongSandbox(Sandbox):
         """Return a long-lived SDK shell (cwd/env persist across ``run`` calls)."""
         sb = self._require()
         shell = await sb.shells.create(cwd=cwd, envs=env)
-        return _OpenyuanrongShell(shell)
+        handle = _OpenyuanrongShell(shell)
+        await handle.run(self._CONDA_ACTIVATE_INIT, timeout=30)
+        return handle
 
     # ----- public: data plane (commands / files / ports) -----
     async def exec(
