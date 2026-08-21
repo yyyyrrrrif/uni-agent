@@ -1,0 +1,51 @@
+# KV-cache-aware router — external plugin config (FQN injection).
+#
+# Loaded by verl through its ``router_config_path``:
+#   rollout.router_config_path: pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml
+# The top-level ``router_class`` FQN is imported and instantiated with this
+# YAML's full content as ``config``. Mirrors the shape of verl router-dev's
+# rollout/router/kvcaware.yaml (single merged file, no Hydra defaults split),
+# with the FQN anchor + _target_ FQN retargeted to the uni_agent package.
+
+router_class: uni_agent.llm_router.balancer.KVCAwareBalancer
+
+# strategies is a LIST here (KVCAwareConfig._extract_strategies accepts list or
+# dict). Each item MUST carry _target_ — from_config hydra-instantiates it.
+strategies:
+  - _target_: uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig
+    # prefix-load-aware / least-inflight / capacity-token-aware
+    slow_cut: prefix-load-aware
+    # kv_load | kv_cache_usage_perc | None (sticky short-circuit check only)
+    overload_mode: kv_load
+    do_shortcut: true
+    memory_overload_filter: true
+    weight: 1.0
+    # Combined score S = alpha*S_cache + (1-alpha)*S_load
+    alpha: 0.3
+    # overload when load > threshold (load ∈ [0,1], bigger = more loaded)
+    load_threshold: 0.6
+    layer_weights:
+      gpu: 0.7
+      cpu: 0.2
+      ssd: 0.1
+    collector_names:
+      - vllm_zmq
+      - vllm_metrics
+      - sticky_stat
+      - inflight_stat
+
+# Collector connection-type tuning (HTTP polling + ZMQ long-connection).
+collector:
+  http_polling:
+    polling_interval: 5
+    http_timeout: 10
+  long_connection:
+    base_retry_delay: 1.0
+    max_retry_delay: 30.0
+    max_retry_attempts: 5
+    retry_backoff_factor: 2.0
+
+# KV cache store tuning (reserved fields — parsed but not yet consumed).
+cache_store:
+  kv_cache_store_type: list
+  ttl: 30
