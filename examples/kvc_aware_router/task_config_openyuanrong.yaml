@@ -1,0 +1,39 @@
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    # image 由数据集每行 sample 的 sandbox.image 注入（provider-agnostic 的
+    # swebench/sweb.eval.x86_64.<id>），OpenyuanrongSandbox.from_config 会自动映射为
+    # swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/...:v2。
+    sandbox_kwargs:
+      cpu: 1000
+      memory: 2048
+      cpu_limit: 4000
+      mem_limit: 8192
+      idle_timeout: 7200
+  agent:
+    name: react
+    max_steps: 100
+    tools:
+      - name: stateful_shell
+        command_timeout: 180
+        env_vars:
+          # 华为云 pypi 镜像: 远端 sandbox 节点到 pypi.org/清华源链路不稳(断点续传失败),
+          # 但到 repo.huaweicloud.com 稳定(与镜像仓库同属华为云域)。固化在此,让裸
+          # pip install 也走华为云源,无需 agent 自行 pip config set。
+          PIP_INDEX_URL: "https://repo.huaweicloud.com/repository/pypi/simple"
+          PIP_TRUSTED_HOST: "repo.huaweicloud.com"
+          PIP_PROGRESS_BAR: "off"
+          PIP_CACHE_DIR: "~/.cache/pip"
+          PAGER: "cat"
+          MANPAGER: "cat"
+          LESS: "-R"
+          TQDM_DISABLE: "1"
+          GIT_PAGER: "cat"
+      - name: str_replace_editor
+      - name: submit
+    model:
+      temperature: 0.8
+      top_p: 0.9
+      max_total_tokens: 8192
+
