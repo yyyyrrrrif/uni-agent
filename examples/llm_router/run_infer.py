@@ -627,9 +627,13 @@ def main() -> None:
     if args.enable_mooncake and args.mooncake_config_path:
         os.environ["MOONCAKE_CONFIG_PATH"] = os.path.expanduser(args.mooncake_config_path)
 
-    # Disable Ray's idle-worker reaper so agent workers survive dispatch gaps
-    # (default ~10 s threshold would kill them prematurely).
-    ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
+    if not ray.is_initialized():
+        if os.environ.get("RAY_ADDRESS"):
+            ray.init(address="auto")
+        else:
+            # Disable Ray's idle-worker reaper so agent workers survive dispatch gaps
+            # (default ~10 s threshold would kill them prematurely).
+            ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
 
     resolver = TaskConfigResolver.from_file(args.task_config)
     served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
