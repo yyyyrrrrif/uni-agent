@@ -1,52 +1,130 @@
-# llm-router 推理快速开始
+# AgentAware Router
 
-Last updated: 08/25/2026
+## 一、动机
 
-## 这是什么
+### 1.1 agentic RL的 rollout 负载特征
 
-本示例在 verl 的 **KV-cache-aware router**（`kvcaware`）上运行 **mini-swe-agent**（黑盒）SWE-bench agentic 推理,router 由 `uni_agent.llm_router` 托管,通过 FQN 注入 verl
-（`rollout.router_config_path` + `pkg://` router YAML,无需 verl 侧注册）。
-会话跑在 uni-agent 的 **framework + task_runner 路径**（`uni_agent.framework.task_runner.run_task`）:vLLM 副本位于 kvcaware 路由器之后
-（KV-cache 命中率 + 负载感知调度),gateway 池在 openyuanrong 远程沙箱中驱动 `mini_swe_agent` 会话,每个任务的 reward 会上报回框架。不启动 trainer。
+Agentic RL的 rollout 阶段，工作负载形态和传统单轮 RL rollout 差异较大：
 
-mini-swe-agent 在沙箱**内部**从一个预构建的 tool 镜像运行（挂载在
-`/opt/mini-swe-agent`），通过反向隧道（`proxy_port` + 运行时注入的 `upstream`）访问策略 gateway，因此沙箱集群与训练集群**无需互通**——只需训练侧能访问沙箱服务（API + 拉镜像）。
+- **多轮对话**：一个 sample 对应一个 agent 会话，单会话动辄上百轮 tool-call，单轮 prefill 又动辄上万 token。会话间轮次差异较大，有的几轮收敛、有的几十上百轮收敛。
+- **强前缀复用**：同一会话的多轮请求共享一条不断增长的前缀历史。若每一轮都能命中上一轮已驻留的 KV-cache，就能跳过大量 prefill 重算；反之每轮重算则 prefill 成本线性累积。
+- **KV Cache驱逐**：会话是长生命周期的，其增长的前缀 KV 只有留在原副本才有价值。但副本 KV 容量有限，单会话工作集就能吃掉一大半，引擎会驱逐旧前缀块腾位，下轮命中失败又得 prefill 重算，形成"撑满→驱逐→miss→重算"的恶性循环。
+- **GPU空泡**：由于请求的上下文长度均值大，分布散，通常导致batch内或replica间存在大量的gpu空泡，进一步造成MFU低下，端到端性能变差。
 
-核心组件:
-- `KVCAwareBalancer` — 路由框架,管理组件生命周期与路由决策
-- `Collector` — 采集 vLLM KV 事件与 Prometheus 指标用于决策
-- `Strategy` — 评分策略,综合 KV-cache 命中率与负载
-- `Store` — 单例存储,缓存采集到的指标与 KV block 状态
+### 1.2 设计目标
 
-task runner / reward / dataset 代码复用自已安装的 `uni-agent` 包
-(`uni_agent.tasks`、`uni_agent.sandbox`)。
+- **前缀命中优先**：会话的后续轮次尽量回到原副本，命中已驻留 KV，打破驱逐→miss→重算循环。
+- **负载均衡迁移触发**：仅在副本确实过载时才解绑迁移，为散热付出的 prefill 重算代价须有明确判据支撑。
+- **减少gpu空泡**：通过调度和多层次KVCache管理，有效缓解gpu空泡问题。
 
-## 前置条件
+---
+
+## 二、Agent Aware Router 详解
+
+### 2.1 总体架构
+
+`kvcaware` 是一个可插拔策略的路由器，注册在 `LoadBalancerRegistry` 下名为 `"kvcaware"`，由 `get_router_handle` 在 `LLMServerManager` 侧装配。核心组件：
+
+```
+KVCAwareBalancer (balancer.py)       ← 纯外壳：生命周期 + route() 委派
+   ├── strategies/                   ← 评分算法（核心）
+   │    ├── kvc_aware.py             ← KVCacheAwareStrategy（主策略）
+   │    ├── routing.py               ← route() 加权排序
+   │    ├── base.py                  ← ReplicaInfo
+   │    └── registry.py              ← config类型 → 运行时策略类 注册表
+   ├── store/                        ← 单例存储
+   │    ├── data_store.py            ← 指标 + sticky绑定 + active_sessions
+   │    ├── kv_cache_store.py        ← prefix-hash 链 + 三层命中率
+   │    ├── per_replica_store.py / per_request_store.py
+   ├── collectors/                   ← 采集 vLLM 信号
+   │    ├── manager.py               ← 采集器生命周期
+   │    ├── decoder/vllm/metrics.py  ← /metrics 轮询 → dict
+   │    ├── decoder/vllm/kv.py, kv_event.py  ← kv-events zmq → 增量 block 状态
+   │    └── transport/{http,zmq,callback}.py
+   ├── config/                       ← KVCAwareConfig + StrategyConfig
+   ├── types/                        ← SlowCut / OverloadMode / Layer / MetricKey 枚举
+   └── insight/emitter.py            ← 推送到 rl-insight → Prometheus → Grafana
+```
+
+### 2.2 路由决策主流程：`score()`
+
+每次 `acquire_server(request_id, prompt_ids)` 时，`Balancer` 调 `route()`，后者对每个策略调 `score()` 取加权排序，取 `ranking[0]`。`KVCacheAwareStrategy.score()` 的决策树：
+
+```
+1. STICKY 短路（do_shortcut=True）
+   ├── 有 request_id 且有 sticky 绑定副本
+   │    └── 未过载？ → HIT，返回 [STICKY_TOP_SCORE, 0, ...]（保前缀局部性）
+   │        过载？ → fallback
+   └── 否 → 进入 slow-cut
+2. SLOW-CUT（短路失败后的兜底评分）
+   └── CAPACITY_TOKEN_AWARE  → 容量门 + token 增量，离散选剩余最大
+```
+
+### 2.3 CAPACITY_TOKEN_AWARE 评分
+
+CAPACITY_TOKEN_AWARE 在"还有余量的副本里，挑prefill命中率最高的"。具体计算公式如下：
+
+```
+avail[i]     = cap × (1 - kv_cache_usage_perc[i])                   # 纯容量可用token
+need[i]      = len(prompt_ids) × (1 - gpu_hit[i])                   # 该请求去副本 i 需新算的 token
+remaining[i] = avail[i] - need[i]                                   # 分配后剩余
+eligible[i]  = avail[i] >= cap × (1 - capacity_reserve_threshold)   # 纯容量硬门
+pick         = argmax(eligible, remaining)                          # 合格里选剩余最大
+```
+
+- prefill命中率靠 `need` 项参与排序，命中率高的副本需新算 token 少、`remaining` 大、在合格副本里胜出。
+- 负载均衡首先根据纯容量硬门 `eligible`过滤，容量已满的副本被过滤掉不再分配。其次根据`avail`项参与排序，`avail`高的副本负载低，`remaining` 大。
+
+---
+
+## 三、实验
+
+本示例说明基于openyuanrong，如何使用 **KV-cache-aware router**（`kvcaware`）在verl后端上运行 SWE-bench agentic 推理。
+
+入口是 `examples/llm_router/run_infer.sh`，其中shell脚本中执行`examples/llm_router/parallel_infer_verl_kvc.py`。
+
+### 3.1 执行路径
+
+kvcaware 路由器挂在 verl 的 `LLMServerManager` 与多个 vLLM 副本之间，把每个会话的每一轮请求路由到合适的副本；其余链路（agent 框架、沙箱、轨迹回传）复用 uni-agent：
+
+```text
+verl LLMServerManager
+    -> KVCAwareBalancer (router)  ── 路由 ──>  vLLM 副本 ×N
+    -> AgentFrameworkRolloutAdapter
+    -> Uni-Agent Gateway sessions
+    -> Task Runner (mini-swe-agent) + sandbox
+    -> TransferQueue trajectories and rewards
+```
+
+router 在第一层就介入：会话的每一轮 `acquire_server` 都由它决定落到哪个副本，副本侧的 KV-cache 占用与前缀命中又被采集回 router 作为下一轮的决策信号。
+
+### 3.2 前置条件
 
 1. 本仓库(含 `verl` submodule)并 `pip install -e .`,使 `uni_agent` 包(托管
    router)可解析。
-2. 一个 **OpenYuanrong** 远程沙箱端点（`OPENYUANRONG_SERVER_ADDRESS` /
-   `OPENYUANRONG_TOKEN`）——唯一支持反向隧道的沙箱 provider,mini-swe-agent
-   的 tool-image 挂载需要它。
-3. **mini-swe-agent tool 镜像**,构建并推送到沙箱服务可拉取的仓库。用兄弟
-   example 构建:
-   ```bash
-   bash examples/mini_swe_agent/build_tool.sh --registry swr.cn-east-3.myhuaweicloud.com/openyuanrong
-   ```
-   随附的 `task_config_mini_swe_agent.yaml` 把
-   `swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest`
-   挂载到 `/opt/mini-swe-agent`;若推送到别处,改 `mounts[].image_url`。
-4. 数据集 parquet(SWE-bench verified)。用 `--data-path` 指向任意兼容的
-   parquet(用 `python -m uni_agent.tasks.swe_bench.preprocess --local-save-dir ~/data/swe_agent`
-   生成)。schema 必须携带 `extra_info.tools_kwargs` 中的 `task` dict
-   (旧格式 `tools_kwargs: {env, reward}` 会被拒绝,需重新生成)。
+2. 一个 AKernel 远程沙箱端点(`AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN`)。
+   随附的 `task_config_openyuanrong.yaml` 通过 `sandbox.image_map` 把数据集里
+   provider-agnostic 的 `swebench/**` 镜像映射到 openyuanrong SWR 仓库
+   (`swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2`),
+   因此普通 SWE-bench parquet 可直接使用。
+3. 数据集 parquet(SWE-bench verified)。用 `--data-path` 指向任意兼容的
+   parquet(可用 uni-agent 的 `examples/data_preprocess/swe_bench_verified.py` 生成)。
+4. 环境变量：
+    仅列出 Ray worker 内部通过 `os.environ` 读取的变量(非 CLI flag)——`run_infer.sh` 会 export 它们,调用前在 shell 里设置:
 
-## 运行
+| 变量 | 默认值 | 说明 |
+|-----|---------|------|
+| `AKERNEL_SERVER_ADDRESS` / `AKERNEL_TOKEN` | 空 | AKernel 远程沙箱认证 |
+| `AKERNEL_TUNNEL_SSL_VERIFY` | `0` | AKernel 隧道 TLS 校验(0 = 禁用) |
+| `VERL_LOGGING_LEVEL` | `INFO` | verl 日志级别 |
+| `SWE_AGENT_EVAL_TIMEOUT` | `600` | 沙箱内 reward 评估超时(秒) |
+| `RL_INSIGHT_SERVER_URL` | `http://127.0.0.1:18080` | rl-insight 可观测性服务 |
 
-`run_infer.sh` 是一个薄包装:导出 Ray worker 环境变量(OpenYuanrong 凭据 +
-可观测性 env),然后把所有 CLI flag 透传给 `run_infer.py`。
-`--task-config` 必填——它按行选择 task / agent / model 配置。完整 flag
-列表与默认值用 `--help` 查看:
+### 3.3 运行
+
+`run_infer.sh` 是一个薄包装:导出 Ray worker 环境变量(AKernel 凭据 + 可观测性 env),然后把所有 CLI flag 透传给 `parallel_infer_verl_kvc.py`。
+
+`--task-config` 必填——它按行选择 task / agent / model 配置。完整 flag 列表与默认值用 `--help` 查看:
 
 ```bash
 bash examples/llm_router/run_infer.sh --help
@@ -55,100 +133,56 @@ bash examples/llm_router/run_infer.sh --help
 bash examples/llm_router/run_infer.sh \
     --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
     --data-path /path/to/swe_bench.parquet \
-    --task-config examples/llm_router/task_config_mini_swe_agent.yaml \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
     --max-samples 1 --kv-events
 
 # 全量运行(省略 --max-samples 即跑整个数据集)
 bash examples/llm_router/run_infer.sh \
     --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
     --data-path /path/to/swe_bench.parquet \
-    --task-config examples/llm_router/task_config_mini_swe_agent.yaml \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
     --tensor-parallel-size 2 --n-gpus-per-node 8 --kv-events
 
 # 带 mooncake 跨副本 KV 共享(mooncake master 单独起)
 bash examples/llm_router/run_infer.sh \
     --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
     --data-path /path/to/swe_bench.parquet \
-    --task-config examples/llm_router/task_config_mini_swe_agent.yaml \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
     --enable-mooncake --kv-events
 
 # Ascend（vllm-ascend）后端
 bash examples/llm_router/run_infer.sh \
     --model-path /path/to/Qwen3-Coder-30B-A3B-Instruct \
     --data-path /path/to/swe_bench.parquet \
-    --task-config examples/llm_router/task_config_mini_swe_agent.yaml \
+    --task-config examples/llm_router/task_config_openyuanrong.yaml \
     --device ascend --enable-mooncake
 ```
 
-主要 CLI flag(完整列表见 `--help`):
+主要 CLI flag:
 
-| Flag | 默认值 | 说明 |
-|------|---------|------|
-| `--data-path` | `~/data/swe_agent/swe_bench_verified.parquet` | 数据集 parquet |
-| `--model-path` / `--model` | `~/models/Qwen3-Coder-30B-A3B-Instruct` | 模型路径 |
-| `--task-config` | (必填) | YAML task 配置(`- name:` 条目),按行驱动每个 sample |
-| `--max-samples` / `--limit` | 全部 | 运行的样本数(省略即全部) |
-| `--n` | `1` | 每个实例的 rollout 会话数 |
-| `--shuffle` / `--seed` | 关 / `42` | 采样前打乱数据,并指定可复现的随机种子 |
-| `--prompt-length` / `--response-length` | `4096` / `8192` | Token 长度 |
-| `--max-model-len` | 引擎钳制 | vLLM 最大上下文长度 |
-| `--tensor-parallel-size` / `--n-gpus-per-node` / `--nnodes` | `4` / `8` / `1` | 并行度 |
-| `--concurrency` | env `GLOBAL_CONCURRENCY` | 最大在途 gateway 会话数 |
-| `--gateway-count` / `--tool-parser` | `4` / `qwen3_coder` | Gateway 池 / 工具调用解析器 |
-| `--gpu-memory-utilization` | `0.9` | vLLM GPU 显存利用率(0-1) |
-| `--router-config-path` | `pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml` | 打包的 router YAML |
-| `--max-num-seqs` | `256` | 每个引擎的最大并发序列数 |
-| `--kv-events` | 关 | 启用 vLLM kv-events(kvcaware 负载信号) |
+(1) 基础配置：
+
+| Flag | 默认 | 说明 |
+|------|------|------|
+| `--model-path` | `~/models/Qwen3.5-9B` | 模型 |
+| `--data-path` | `.../swe_bench_verified.parquet` | 数据集 |
+| `--task-config` | `.../task_config_openyuanrong.yaml` | task配置文件 |
+| `--max-samples` | `-1` | 样本数（-1 全部） |
+| `--shuffle` / `--seed` | 关 / 42 | 打乱+可复现种子 |
+| `--prompt-length` / `--response-length` | 4096 / 131072 | token 长度 |
+| `--max-model-len` | config 原生上限 | 设后 prompt = max_model_len - response_length - 100 |
+| `--n` | 1 | rollout.n |
+| `--tensor-parallel-size` / `--n-gpus-per-node` / `--nnodes` | 4 / 8 / 1 | 并行度 |
+| `--gateway-count` / `--max-concurrent-sessions` | 1 / 128 | gateway 池 / 并发 |
+| `--gpu-memory-utilization` | 0.8 | vLLM 显存利用率 |
+| `--device` | `gpu` | `gpu` / `ascend`（mooncake connector 类） |
+
+(2) 路由策略（覆盖 `kvcaware.yaml` 默认值）：
+
+| Flag | 说明 |
+|------|------|
+| `--kv-events` | 关 | 启用 vLLM kv-events（kvcaware 负载信号） |
 | `--enable-mooncake` / `--mooncake-config-path` | 关 / `mooncake_config.json` | 跨副本 KV 共享 |
-| `--device` | `gpu` | `gpu` 或 `ascend`(选择 mooncake connector 类) |
-| `--alpha` / `--load-threshold` / `--slow-cut` / `--overload-mode` / `--do-shortcut` | 取自 `kvcaware.yaml` | kvcaware strategy[0] 覆盖 |
-
-## 环境变量
-
-仅列出 Ray worker 内部通过 `os.environ` 读取的变量(非 CLI flag)——
-`run_infer.sh` 会 export 它们,调用前在 shell 里设置:
-
-| 变量 | 默认值 | 说明 |
-|-----|---------|------|
-| `OPENYUANRONG_SERVER_ADDRESS` / `OPENYUANRONG_TOKEN` | 空 | OpenYuanrong 远程沙箱认证 |
-| `OPENYUANRONG_TUNNEL_SSL_VERIFY` | `0` | 沙箱反向隧道 TLS 校验(0 = 禁用) |
-| `SANDBOX_NAME_PREFIX` | `mini-swe-` | 创建沙箱名称的前缀 |
-| `VERL_LOGGING_LEVEL` | `INFO` | verl 日志级别 |
-| `RL_INSIGHT_SERVER_URL` | `http://127.0.0.1:18080` | rl-insight 可观测性服务 |
-
-## 可观测性
-
-运行日志携带 router 的调度证据——balancer 的 `routed to server` 行、strategy
-的 `score(): COMBINED` 日志、kv-events collector 指标。结束时
-`run_infer.py` 打印 `inference summary` 块(mean rm_score 与
-逐 session 明细),设置 `--result-path` 时会另写一个 JSON 结果文件。
-
-## 实验矩阵
-
-两个 driver 扫一组 sticky-vs-kvcaware 矩阵(并发 × 上下文),每次运行重试
-直到日志中出现 `inference summary` 成功哨兵。两者都硬编码 `--device ascend`
-（vllm-ascend）与 `--kv-events`;kvcaware 单元把 `--load-threshold` 扫过
-`0.1..0.9`。
-
-- `ascend-exps.sh` — 单节点(16 NPU,TP=4 → 4 replicas)。先改文件顶部的
-  `MODEL` / `DATASET` / `MAX_SAMPLES`,再 `bash examples/llm_router/ascend-exps.sh`。
-- `multi-node-ascend-exps.sh` — 6 节点(本机 = Ray head + 5 个免密 SSH worker,
-  每个通过 `docker exec hgq-verl-ascend` 进入;48 NPU / TP=4 → 12 replicas)。
-  每次尝试会重建并拆除 Ray 集群。先改 `WORKERS[]` 主机列表与 `MODEL` /
-  `DATASET`。
-
-`run_infer.sh` 是底层唯一入口;两个 driver 都只是循环调用它。
-
-## 注意事项
-
-- task runner 需要 OpenYuanrong 远程沙箱;没有它会快速失败。反向隧道
-  （`proxy_port` + 运行时 `upstream`）仅 openyuanrong provider 支持——在
-  其他 provider 上配置 `proxy_port` 会被显式拒绝。
-- 首次运行前先用 `examples/mini_swe_agent/build_tool.sh` 构建 tool 镜像并
-  推送到沙箱服务可拉取的仓库;task config 把它挂载到 `/opt/mini-swe-agent`。
-- `agent.step_limit` 限制 mini-swe-agent 的轮次;`agent.run_timeout` 限制
-  沙箱内 agent 进程的运行时间(秒)。让 `--max-model-len` 明显高于单 episode
-  token 预算,以免长 transcript 被 vLLM 拒绝。
-- 数据集 schema 必须携带 `extra_info.tools_kwargs` 中的 `task` dict(task
-  runner 据此解析任务)。如果你的 parquet 早于该格式,请用
-  `python -m uni_agent.tasks.swe_bench.preprocess` 重新生成。
+| `--slow-cut` | `capacity-token-aware` |
+| `--overload-mode` | `None` / `kv_cache_usage_perc` / `kv_load` |
+| `--load-threshold` | 过载阈值|

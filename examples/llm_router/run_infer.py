@@ -434,8 +434,7 @@ def _report(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Parallel agent inference over a verl-launched engine with the KV-cache-aware "
-            "router (framework + TQ path)."
+            "Parallel agent inference over a verl-launched engine with the KV-cache-aware router (framework + TQ path)."
         )
     )
 
