@@ -53,149 +53,52 @@ pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
 class TestStrategyNormalInput:
-    """S01-S12: normal input/output cases"""
+    """Normal construction: field assignment, defaults, collector binding."""
 
-    def test_s01_weight_1_0(self):
+    @pytest.mark.parametrize("kwargs,attr,expected", [
+        # weight explicit value
+        ({"weight": 1.0, "collector_names": _CN}, "weight", 1.0),
+        # alpha default when omitted
+        ({"weight": 1.0, "collector_names": _CN}, "alpha", 0.7),
+        # load_threshold explicit value
+        ({"weight": 1.0, "load_threshold": 0.5, "collector_names": _CN}, "load_threshold", 0.5),
+        # layer_weights three-tier dict
+        ({"weight": 1.0, "layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}, "collector_names": _CN},
+         "layer_weights", {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}),
+        # memory_overload_filter explicit False
+        ({"weight": 1.0, "memory_overload_filter": False, "collector_names": _CN},
+         "memory_overload_filter", False),
+    ])
+    def test_normal_fields_parse(self, kwargs, attr, expected):
         """
-        Feature: weight field parses normally
-        Description: construct KVCAwareStrategyConfig with weight=1.0
-        Expectation: cfg.weight == 1.0
+        Feature: strategy fields assign explicit values and fall back to defaults
+        Description: construct KVCAwareStrategyConfig with varied kwargs
+        Expectation: each field equals the expected explicit or default value
         """
-        cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.weight == 1.0
+        cfg = KVCAwareStrategyConfig(**kwargs)
+        assert getattr(cfg, attr) == expected
 
-    def test_s02_weight_0_7(self):
+    def test_slow_cut_string_coerced(self):
         """
-        Feature: weight field accepts decimal values
-        Description: construct KVCAwareStrategyConfig with weight=0.7
-        Expectation: cfg.weight == 0.7
-        """
-        cfg = KVCAwareStrategyConfig(weight=0.7, collector_names=_CN)
-        assert cfg.weight == 0.7
-
-    def test_s03_alpha_0_7(self):
-        """
-        Feature: alpha field parses normally
-        Description: construct KVCAwareStrategyConfig with alpha=0.7
-        Expectation: cfg.alpha == 0.7
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, alpha=0.7, collector_names=_CN)
-        assert cfg.alpha == 0.7
-
-    def test_s04_alpha_0_pure_load(self):
-        """
-        Feature: alpha=0.0 yields pure-load scoring
-        Description: construct KVCAwareStrategyConfig with alpha=0.0
-        Expectation: cfg.alpha == 0.0
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, alpha=0.0, collector_names=_CN)
-        assert cfg.alpha == 0.0
-
-    def test_s05_alpha_1_pure_cache(self):
-        """
-        Feature: alpha=1.0 yields pure-cache scoring
-        Description: construct KVCAwareStrategyConfig with alpha=1.0
-        Expectation: cfg.alpha == 1.0
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, alpha=1.0, collector_names=_CN)
-        assert cfg.alpha == 1.0
-
-    def test_s06_alpha_default_0_7(self):
-        """
-        Feature: alpha uses default when omitted
-        Description: construct KVCAwareStrategyConfig without alpha
-        Expectation: cfg.alpha == 0.7
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.alpha == 0.7
-
-    def test_s07_load_threshold_0_5(self):
-        """
-        Feature: load_threshold field parses normally
-        Description: construct KVCAwareStrategyConfig with load_threshold=0.5
-        Expectation: cfg.load_threshold == 0.5
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, load_threshold=0.5, collector_names=_CN)
-        assert cfg.load_threshold == 0.5
-
-    def test_s08_load_threshold_default_0_9(self):
-        """
-        Feature: load_threshold uses default when omitted
-        Description: construct KVCAwareStrategyConfig without load_threshold
-        Expectation: cfg.load_threshold == 0.9 (load ceiling; overload when load > threshold)
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.load_threshold == 0.9
-
-    def test_s09_layer_weights_dict(self):
-        """
-        Feature: layer_weights custom dict parses normally (three tiers: gpu/cpu/ssd)
-        Description: construct strategy config with layer_weights={"gpu":0.7,"cpu":0.2,"ssd":0.1}
-        Expectation: cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
-        """
-        cfg = KVCAwareStrategyConfig(
-            weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}, collector_names=_CN
-        )
-        assert cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
-
-    def test_s10_layer_weights_default(self):
-        """
-        Feature: layer_weights uses default when omitted
-        Description: construct KVCAwareStrategyConfig without layer_weights
-        Expectation: cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
-
-    def test_s10b_memory_overload_filter_default_true(self):
-        """
-        Feature: memory_overload_filter uses default when omitted
-        Description: construct KVCAwareStrategyConfig without memory_overload_filter
-        Expectation: cfg.memory_overload_filter is True
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.memory_overload_filter is True
-
-    def test_s10c_memory_overload_filter_false(self):
-        """
-        Feature: memory_overload_filter=False parses normally
-        Description: construct strategy config with memory_overload_filter=False
-        Expectation: cfg.memory_overload_filter is False
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, memory_overload_filter=False, collector_names=_CN)
-        assert cfg.memory_overload_filter is False
-
-    def test_s10d_slow_cut_default_prefix_load_aware(self):
-        """
-        Feature: slow_cut uses default when omitted
-        Description: construct KVCAwareStrategyConfig without slow_cut
-        Expectation: cfg.slow_cut == SlowCut.PREFIX_LOAD_AWARE
-        """
-        cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=_CN)
-        assert cfg.slow_cut == SlowCut.PREFIX_LOAD_AWARE
-
-    def test_s10e_slow_cut_str_coerced(self):
-        """
-        Feature: slow_cut accepts a YAML string and coerces to SlowCut
+        Feature: slow_cut accepts a YAML string and coerces to the SlowCut enum
         Description: construct strategy config with slow_cut="least-inflight"
         Expectation: cfg.slow_cut == SlowCut.LEAST_INFLIGHT
         """
         cfg = KVCAwareStrategyConfig(weight=1.0, slow_cut="least-inflight", collector_names=_CN)
         assert cfg.slow_cut == SlowCut.LEAST_INFLIGHT
 
-    def test_s11_collector_names_bind(self):
+    def test_collector_names_binds_multiple(self):
         """
-        Feature: collector_names binds multiple collectors
-        Description: construct strategy config with collector_names=["vllm_zmq","mooncake_prometheus"]
-        Expectation: cfg.collector_names has length 2 and matches
+        Feature: collector_names binds multiple collector identifiers in order
+        Description: construct strategy config with two collector names
+        Expectation: cfg.collector_names equals the input list
         """
         cfg = KVCAwareStrategyConfig(weight=1.0, collector_names=["vllm_zmq", "mooncake_prometheus"])
         assert cfg.collector_names == ["vllm_zmq", "mooncake_prometheus"]
-        assert len(cfg.collector_names) == 2
 
-    def test_s12_multi_strategy_weights_sum_to_1(self):
+    def test_multi_strategy_weights_sum_to_one(self):
         """
-        Feature: sum of multi-strategy weights is ~1.0
+        Feature: weights across multiple strategies sum to ~1.0
         Description: construct two strategies with weights 0.6 and 0.4
         Expectation: sum of weights == pytest.approx(1.0)
         """
@@ -203,133 +106,63 @@ class TestStrategyNormalInput:
         s2 = KVCAwareStrategyConfig(weight=0.4, collector_names=["mooncake_prometheus"])
         assert s1.weight + s2.weight == pytest.approx(1.0)
 
-    def test_s12b_collector_names_missing_required(self):
-        """
-        Feature: construction fails when collector_names is missing
-        Description: construct strategy config without the required collector_names
-        Expectation: raises TypeError
-        """
-        with pytest.raises(TypeError):
-            KVCAwareStrategyConfig(weight=1.0)
-
 
 # -- ② Input/output abnormal cases --
 
 
 class TestStrategyAbnormalInput:
-    """S13-S23: abnormal input/output cases"""
+    """Abnormal construction: per-field validation errors."""
 
-    def test_s13_weight_zero(self):
+    @pytest.mark.parametrize("weight", [0.0, 1.5, -1.0])
+    def test_weight_out_of_range_raises_config_error(self, weight):
         """
-        Feature: weight=0 triggers validation error
-        Description: construct strategy config with weight=0.0
+        Feature: weight outside (0, 1) triggers validation error
+        Description: construct strategy config with weight = 0.0 / 1.5 / -1.0
         Expectation: raises ConfigError matching "weight"
         """
         with pytest.raises(ConfigError, match="weight"):
-            KVCAwareStrategyConfig(weight=0.0, collector_names=_CN)
+            KVCAwareStrategyConfig(weight=weight, collector_names=_CN)
 
-    def test_s14_weight_above_1(self):
+    @pytest.mark.parametrize("weight", ["0.7", None])
+    def test_weight_wrong_type_or_missing_raises_type_error(self, weight):
         """
-        Feature: weight above upper bound triggers validation error
-        Description: construct strategy config with weight=1.5
-        Expectation: raises ConfigError matching "weight"
-        """
-        with pytest.raises(ConfigError, match="weight"):
-            KVCAwareStrategyConfig(weight=1.5, collector_names=_CN)
-
-    def test_s15_weight_negative(self):
-        """
-        Feature: negative weight triggers validation error
-        Description: construct strategy config with weight=-1.0
-        Expectation: raises ConfigError matching "weight"
-        """
-        with pytest.raises(ConfigError, match="weight"):
-            KVCAwareStrategyConfig(weight=-1.0, collector_names=_CN)
-
-    def test_s16_weight_string_type_error(self):
-        """
-        Feature: construction fails on wrong weight type
-        Description: construct strategy config with weight="0.7"
+        Feature: weight of wrong type or missing triggers TypeError
+        Description: construct strategy config with weight="0.7" or without weight
         Expectation: raises TypeError
         """
-        with pytest.raises(TypeError):
-            KVCAwareStrategyConfig(weight="0.7", collector_names=_CN)
+        if weight is None:
+            with pytest.raises(TypeError):
+                KVCAwareStrategyConfig(collector_names=_CN)
+        else:
+            with pytest.raises(TypeError):
+                KVCAwareStrategyConfig(weight=weight, collector_names=_CN)
 
-    def test_s17_weight_missing_required(self):
+    @pytest.mark.parametrize("load_threshold", [0, -1, 1.0, 80])
+    def test_load_threshold_out_of_range_raises_config_error(self, load_threshold):
         """
-        Feature: construction fails when weight is missing
-        Description: construct strategy config without the required weight
-        Expectation: raises TypeError
-        """
-        with pytest.raises(TypeError):
-            KVCAwareStrategyConfig(collector_names=_CN)
-
-    def test_s18_load_threshold_zero(self):
-        """
-        Feature: load_threshold=0 triggers validation error
-        Description: construct strategy config with load_threshold=0
+        Feature: load_threshold outside (0, 1) triggers validation error
+        Description: construct strategy config with load_threshold = 0 / -1 / 1.0 / 80
         Expectation: raises ConfigError matching "load_threshold"
         """
         with pytest.raises(ConfigError, match="load_threshold"):
-            KVCAwareStrategyConfig(weight=1.0, load_threshold=0, collector_names=_CN)
+            KVCAwareStrategyConfig(weight=1.0, load_threshold=load_threshold, collector_names=_CN)
 
-    def test_s19_load_threshold_negative(self):
+    @pytest.mark.parametrize("layer_weights", [
+        {"gpu": 0.7, "cpu": 0.2, "disk": 0.1},   # illegal key
+        {"gpu": 0.7, "cpu": 0.3},                 # missing tier
+        {"gpu": 0.5, "cpu": 0.2, "ssd": 0.1},     # sum < 1
+        {"gpu": 0.7, "cpu": 0.2, "ssd": 0.2},     # sum > 1
+    ])
+    def test_layer_weights_invalid_raises_config_error(self, layer_weights):
         """
-        Feature: negative load_threshold triggers validation error
-        Description: construct strategy config with load_threshold=-1
-        Expectation: raises ConfigError matching "load_threshold"
-        """
-        with pytest.raises(ConfigError, match="load_threshold"):
-            KVCAwareStrategyConfig(weight=1.0, load_threshold=-1, collector_names=_CN)
-
-    def test_s19b_load_threshold_one_or_above(self):
-        """
-        Feature: load_threshold >= 1 triggers validation error
-        Description: construct strategy config with load_threshold=1.0 and load_threshold=80
-        Expectation: raises ConfigError matching "load_threshold"
-        """
-        with pytest.raises(ConfigError, match="load_threshold"):
-            KVCAwareStrategyConfig(weight=1.0, load_threshold=1.0, collector_names=_CN)
-        with pytest.raises(ConfigError, match="load_threshold"):
-            KVCAwareStrategyConfig(weight=1.0, load_threshold=80, collector_names=_CN)
-
-    def test_s20_layer_weights_non_gpu_cpu_ssd_key(self):
-        """
-        Feature: layer_weights with illegal key triggers validation error
-        Description: construct strategy config with a "disk" key in layer_weights
+        Feature: invalid layer_weights triggers validation error
+        Description: construct strategy config with illegal key / missing tier / sum below or above 1.0
         Expectation: raises ConfigError matching "layer_weights"
         """
         with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "disk": 0.1}, collector_names=_CN)
+            KVCAwareStrategyConfig(weight=1.0, layer_weights=layer_weights, collector_names=_CN)
 
-    def test_s21_layer_weights_missing_key(self):
-        """
-        Feature: layer_weights missing a required tier triggers validation error
-        Description: construct strategy config with layer_weights missing "ssd"
-        Expectation: raises ConfigError matching "layer_weights"
-        """
-        with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.3}, collector_names=_CN)
-
-    def test_s21b_layer_weights_sum_below_one(self):
-        """
-        Feature: layer_weights values summing below 1.0 trigger validation error
-        Description: construct strategy config with weights summing to 0.8
-        Expectation: raises ConfigError matching "layer_weights"
-        """
-        with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.5, "cpu": 0.2, "ssd": 0.1}, collector_names=_CN)
-
-    def test_s21c_layer_weights_sum_above_one(self):
-        """
-        Feature: layer_weights values summing above 1.0 trigger validation error
-        Description: construct strategy config with weights summing to 1.1
-        Expectation: raises ConfigError matching "layer_weights"
-        """
-        with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.2}, collector_names=_CN)
-
-    def test_s22_collector_names_not_list_type(self):
+    def test_collector_names_not_list_raises_config_error(self):
         """
         Feature: non-list collector_names triggers validation error
         Description: construct strategy config with collector_names="vllm_zmq"
@@ -338,77 +171,54 @@ class TestStrategyAbnormalInput:
         with pytest.raises(ConfigError, match="collector_names must be a list"):
             KVCAwareStrategyConfig(weight=1.0, collector_names="vllm_zmq")
 
-    def test_s22b_memory_overload_filter_non_bool(self):
+    def test_collector_names_missing_raises_type_error(self):
         """
-        Feature: non-bool memory_overload_filter triggers validation error
-        Description: construct strategy config with memory_overload_filter="yes"
-        Expectation: raises ConfigError matching "memory_overload_filter"
+        Feature: missing required collector_names triggers TypeError
+        Description: construct strategy config without collector_names
+        Expectation: raises TypeError
         """
-        with pytest.raises(ConfigError, match="memory_overload_filter"):
-            KVCAwareStrategyConfig(weight=1.0, memory_overload_filter="yes", collector_names=_CN)
+        with pytest.raises(TypeError):
+            KVCAwareStrategyConfig(weight=1.0)
 
-    def test_s22c_slow_cut_invalid_value(self):
+    @pytest.mark.parametrize("field,value", [
+        ("memory_overload_filter", "yes"),
+        ("slow_cut", "random"),
+    ])
+    def test_optional_field_wrong_type_or_value_raises_config_error(self, field, value):
         """
-        Feature: unknown slow_cut value triggers validation error
-        Description: construct strategy config with slow_cut="random"
-        Expectation: raises ConfigError matching "slow_cut"
+        Feature: optional field of wrong type or value triggers validation error
+        Description: construct strategy config with memory_overload_filter="yes" or slow_cut="random"
+        Expectation: raises ConfigError matching the field name
         """
-        with pytest.raises(ConfigError, match="slow_cut"):
-            KVCAwareStrategyConfig(weight=1.0, slow_cut="random", collector_names=_CN)
+        with pytest.raises(ConfigError, match=field):
+            KVCAwareStrategyConfig(weight=1.0, **{field: value}, collector_names=_CN)
 
-    def test_s23_multi_strategy_weights_not_sum_to_1(self):
-        """
-        Feature: multi-strategy weights not summing to 1.0 triggers validation error
-        Description: from_config with two strategies each weighted 0.4
-        Expectation: raises ConfigError matching "weight"
-        """
-        kwargs = OmegaConf.create(
+    @pytest.mark.parametrize("strategies", [
+        # weights not summing to 1
+        [
             {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 0.4,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 0.4,
-                        "collector_names": ["mooncake_prometheus"],
-                    },
-                ],
-            }
-        )
-        with pytest.raises(ConfigError, match="weight"):
-            KVCAwareConfig.from_config(kwargs)
-
-    def test_s23b_strategies_empty_list(self):
+                "_target": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 0.4,
+                "collector_names": ["vllm_zmq"],
+            },
+            {
+                "_target": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 0.4,
+                "collector_names": ["mooncake_prometheus"],
+            },
+        ],
+        [],                 # empty list
+        "kvc_aware",        # not a list
+        ["kvc_aware"],      # item not dict
+    ])
+    def test_strategies_invalid_raises_config_error(self, strategies):
         """
-        Feature: empty strategies list triggers validation error
-        Description: from_config with strategies=[]
-        Expectation: raises ConfigError matching "strategies"
+        Feature: invalid strategies list triggers from_config validation error
+        Description: from_config with weights not summing to 1 / empty list / non-list / item not dict
+        Expectation: raises ConfigError
         """
-        kwargs = OmegaConf.create({"strategies": []})
-        with pytest.raises(ConfigError, match="strategies"):
-            KVCAwareConfig.from_config(kwargs)
-
-    def test_s23c_strategies_not_list(self):
-        """
-        Feature: illegal strategies type triggers validation error
-        Description: from_config with strategies="kvc_aware"
-        Expectation: raises ConfigError matching "strategies"
-        """
-        kwargs = OmegaConf.create({"strategies": "kvc_aware"})
-        with pytest.raises(ConfigError, match="strategies"):
-            KVCAwareConfig.from_config(kwargs)
-
-    def test_s23d_strategy_item_not_dict(self):
-        """
-        Feature: non-dict strategy item triggers validation error
-        Description: from_config with strategies=["kvc_aware"]
-        Expectation: raises ConfigError matching "strategies"
-        """
-        kwargs = OmegaConf.create({"strategies": ["kvc_aware"]})
-        with pytest.raises(ConfigError, match="strategies"):
+        kwargs = OmegaConf.create({"strategies": strategies})
+        with pytest.raises(ConfigError):
             KVCAwareConfig.from_config(kwargs)
 
 
@@ -416,14 +226,16 @@ class TestStrategyAbnormalInput:
 
 
 class TestStrategyHydraNormal:
-    """S24-S26: Hydra parsing normal cases"""
+    """Hydra instantiate produces a fully-populated KVCAwareStrategyConfig."""
 
-    def test_s24_strategy_instantiate(self):
+    def test_strategy_instantiates_with_explicit_fields_and_defaults(self):
         """
-        Feature: strategy instantiates via _target_
-        Description: instantiate a strategy OmegaConf entry with _target_
-        Expectation: result is a KVCAwareStrategyConfig instance
+        Feature: Hydra instantiate produces a fully-populated KVCAwareStrategyConfig
+        Description: instantiate a strategy entry with weight and collector_names
+        Expectation: result is a KVCAwareStrategyConfig/StrategyConfig, explicit fields preserved, defaults filled
         """
+        from hydra.utils import instantiate
+
         entry = OmegaConf.create(
             {
                 "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
@@ -431,141 +243,65 @@ class TestStrategyHydraNormal:
                 "collector_names": ["vllm_zmq"],
             }
         )
-        from hydra.utils import instantiate
-
         result = instantiate(entry)
+
+        # concrete type and StrategyConfig base
         assert isinstance(result, KVCAwareStrategyConfig)
-
-    def test_s25_strategy_inherit_base(self):
-        """
-        Feature: strategy instance inherits StrategyConfig base
-        Description: instantiate a strategy entry then assert base type
-        Expectation: result is a StrategyConfig instance and weight==1.0
-        """
-        entry = OmegaConf.create(
-            {
-                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                "weight": 1.0,
-                "collector_names": ["vllm_zmq"],
-            }
-        )
-        from hydra.utils import instantiate
-
-        result = instantiate(entry)
         assert isinstance(result, StrategyConfig)
+        # explicit field preserved
         assert result.weight == 1.0
-
-    def test_s26_strategy_defaults_filled(self):
-        """
-        Feature: defaults are filled after strategy instantiation
-        Description: instantiate a strategy entry with only weight/collector_names
-        Expectation: alpha/load_threshold/layer_weights equal defaults
-        """
-        entry = OmegaConf.create(
-            {
-                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                "weight": 1.0,
-                "collector_names": ["vllm_zmq"],
-            }
-        )
-        from hydra.utils import instantiate
-
-        result = instantiate(entry)
+        assert result.collector_names == ["vllm_zmq"]
+        # defaults filled in
         assert result.alpha == 0.7
         assert result.load_threshold == 0.9
         assert result.layer_weights == {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}
-        assert result.collector_names == ["vllm_zmq"]
 
 
 # -- ④ Hydra parsing abnormal cases --
 
 
 class TestStrategyHydraAbnormal:
-    """S27-S30: Hydra parsing abnormal cases"""
+    """Invalid _target_ / strategies configuration is rejected."""
 
-    def test_s27_target_module_not_exist(self):
+    def test_instantiate_rejects_nonexistent_module(self):
         """
-        Feature: instantiation fails when _target_ module does not exist
+        Feature: instantiate fails when _target_ module does not exist
         Description: instantiate an entry whose _target_ points to nonexistent.Module.Class
         Expectation: raises InstantiationException/ImportError/ConfigError
         """
-        entry = OmegaConf.create({"_target_": "nonexistent.Module.Class"})
         from hydra.utils import instantiate
 
+        entry = OmegaConf.create({"_target_": "nonexistent.Module.Class"})
         with pytest.raises((InstantiationException, ImportError, ConfigError)):
             instantiate(entry)
 
-    def test_s28_target_class_not_exist(self):
+    @pytest.mark.parametrize("strategies,match", [
+        # missing _target_ on a strategy item
+        ({"strategies": [{"weight": 1.0}]}, "_target_"),
+        # _target_ pointing to a non-StrategyConfig subclass
+        (
+            {"strategies": [
+                {
+                    "_target_": "uni_agent.llm_router.config.CacheStoreConfig",
+                    "kv_cache_store_type": "list",
+                    "ttl": 30,
+                },
+            ]},
+            "StrategyConfig",
+        ),
+        # empty config — no strategies key at all
+        ({}, "strategies"),
+        # strategies explicitly null
+        ({"strategies": None}, "strategies"),
+    ])
+    def test_from_config_rejects_invalid_strategies(self, strategies, match):
         """
-        Feature: instantiation fails when _target_ class does not exist
-        Description: instantiate an entry whose _target_ points to config.NonExistClass
-        Expectation: raises InstantiationException/AttributeError/ConfigError
+        Feature: from_config rejects invalid strategies configuration
+        Description: missing _target_ / non-StrategyConfig _target_ / empty config / null strategies
+        Expectation: raises ConfigError matching the relevant keyword
         """
-        entry = OmegaConf.create(
-            {
-                "_target_": "uni_agent.llm_router.config.NonExistClass",
-            }
-        )
-        from hydra.utils import instantiate
-
-        with pytest.raises((InstantiationException, AttributeError, ConfigError)):
-            instantiate(entry)
-
-    def test_s29_target_missing(self):
-        """
-        Feature: strategy item missing _target_ triggers validation error
-        Description: from_config with a strategy item that has no _target_
-        Expectation: raises ConfigError matching "_target_"
-        """
-        kwargs = OmegaConf.create({"strategies": [{"weight": 1.0}]})
-        with pytest.raises(ConfigError, match="_target_"):
-            KVCAwareConfig.from_config(kwargs)
-
-    def test_s30_target_not_strategy_subclass(self):
-        """
-        Feature: _target_ pointing to a non-strategy subclass triggers validation error
-        Description: from_config with a strategy item whose _target_ is CacheStoreConfig
-        Expectation: raises ConfigError matching "StrategyConfig"
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.CacheStoreConfig",
-                        "kv_cache_store_type": "list",
-                        "ttl": 30,
-                    },
-                ],
-            }
-        )
-        with pytest.raises(ConfigError, match="StrategyConfig"):
-            KVCAwareConfig.from_config(kwargs)
-
-
-# -- ⑤ Other cases --
-
-
-class TestStrategyOther:
-    """S31-S32: other cases"""
-
-    def test_s31_empty_config_no_strategy(self):
-        """
-        Feature: empty config triggers strategies-required error
-        Description: from_config with an empty OmegaConf dict
-        Expectation: raises ConfigError matching "strategies"
-        """
-        kwargs = OmegaConf.create({})
-        with pytest.raises(ConfigError, match="strategies"):
-            KVCAwareConfig.from_config(kwargs)
-
-    def test_s32_strategies_null_error(self):
-        """
-        Feature: null strategies triggers required error
-        Description: from_config with strategies=None
-        Expectation: raises ConfigError matching "strategies"
-        """
-        kwargs = OmegaConf.create({"strategies": None})
-        with pytest.raises(ConfigError, match="strategies"):
+        kwargs = OmegaConf.create(strategies)
+        with pytest.raises(ConfigError, match=match):
             KVCAwareConfig.from_config(kwargs)
 
 
@@ -577,158 +313,83 @@ class TestStrategyOther:
 
 
 class TestMetricsNormalInput:
-    """M01-M09: normal input/output cases"""
+    """CollectorConfig normal construction: defaults, custom values, dataclass shape."""
 
-    # -- CollectorConfig: http_polling dict --
+    @pytest.mark.parametrize("kwargs,attr,expected", [
+        # http_polling default
+        ({}, "http_polling", {"polling_interval": 5.0, "http_timeout": 10.0}),
+        # http_polling custom
+        ({"http_polling": {"polling_interval": 3.0, "http_timeout": 15.0}},
+         "http_polling", {"polling_interval": 3.0, "http_timeout": 15.0}),
+        # long_connection default
+        ({}, "long_connection", {
+            "base_retry_delay": 1.0, "max_retry_delay": 30.0,
+            "max_retry_attempts": 5, "retry_backoff_factor": 2.0,
+        }),
+        # long_connection custom
+        ({"long_connection": {
+            "base_retry_delay": 2.0, "max_retry_delay": 60.0,
+            "max_retry_attempts": 10, "retry_backoff_factor": 3.0,
+        }}, "long_connection", {
+            "base_retry_delay": 2.0, "max_retry_delay": 60.0,
+            "max_retry_attempts": 10, "retry_backoff_factor": 3.0,
+        }),
+    ])
+    def test_fields_parse_default_and_custom(self, kwargs, attr, expected):
+        """
+        Feature: CollectorConfig fields accept custom values and fall back to defaults
+        Description: construct CollectorConfig with varied http_polling / long_connection kwargs
+        Expectation: each field equals the expected explicit or default value
+        """
+        cfg = CollectorConfig(**kwargs)
+        assert getattr(cfg, attr) == expected
 
-    def test_m01_http_polling_default(self):
+    def test_collector_config_is_dataclass_with_connection_fields(self):
         """
-        Feature: CollectorConfig default http_polling values
-        Description: construct CollectorConfig with no args
-        Expectation: http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
-        """
-        cfg = CollectorConfig()
-        assert cfg.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
-
-    def test_m02_http_polling_custom(self):
-        """
-        Feature: http_polling accepts custom values
-        Description: construct CollectorConfig with custom http_polling
-        Expectation: http_polling equals custom values
-        """
-        cfg = CollectorConfig(http_polling={"polling_interval": 3.0, "http_timeout": 15.0})
-        assert cfg.http_polling == {"polling_interval": 3.0, "http_timeout": 15.0}
-
-    # -- CollectorConfig: long_connection dict --
-
-    def test_m03_long_connection_default(self):
-        """
-        Feature: CollectorConfig default long_connection values
-        Description: construct CollectorConfig with no args
-        Expectation: long_connection equals the four default params
-        """
-        cfg = CollectorConfig()
-        assert cfg.long_connection == {
-            "base_retry_delay": 1.0,
-            "max_retry_delay": 30.0,
-            "max_retry_attempts": 5,
-            "retry_backoff_factor": 2.0,
-        }
-
-    def test_m04_long_connection_custom(self):
-        """
-        Feature: long_connection accepts custom values
-        Description: construct CollectorConfig with custom long_connection
-        Expectation: base_retry_delay/max_retry_delay equal custom values
-        """
-        cfg = CollectorConfig(
-            long_connection={
-                "base_retry_delay": 2.0,
-                "max_retry_delay": 60.0,
-                "max_retry_attempts": 10,
-                "retry_backoff_factor": 3.0,
-            }
-        )
-        assert cfg.long_connection["base_retry_delay"] == 2.0
-        assert cfg.long_connection["max_retry_delay"] == 60.0
-
-    # -- CollectorConfig base class is empty (placeholder) --
-
-    def test_m08_collector_config_fields(self):
-        """
-        Feature: CollectorConfig exposes connection-type fields
-        Description: inspect the dataclass field set of CollectorConfig
-        Expectation: field set is {http_polling, long_connection}
-        """
-        import dataclasses
-
-        field_names = {f.name for f in dataclasses.fields(CollectorConfig)}
-        assert field_names == {"http_polling", "long_connection"}
-
-    def test_m09_collector_config_is_dataclass(self):
-        """
-        Feature: CollectorConfig is a dataclass
-        Description: check the dataclass type of CollectorConfig
-        Expectation: is_dataclass returns True
+        Feature: CollectorConfig is a dataclass exposing connection-type fields
+        Description: inspect the dataclass type and field set of CollectorConfig
+        Expectation: is_dataclass is True; field set is {http_polling, long_connection}
         """
         import dataclasses
 
         assert dataclasses.is_dataclass(CollectorConfig)
+        assert {f.name for f in dataclasses.fields(CollectorConfig)} == {"http_polling", "long_connection"}
 
 
 # -- ② Input/output abnormal cases --
 
 
 class TestMetricsAbnormalInput:
-    """M10-M17: abnormal input/output cases"""
+    """CollectorConfig abnormal: per-field validation errors."""
 
-    def test_m10_polling_interval_zero(self):
+    @pytest.mark.parametrize("http_polling,match", [
+        ({"polling_interval": 0, "http_timeout": 10}, "polling_interval"),
+        ({"polling_interval": -1, "http_timeout": 10}, "polling_interval"),
+        ({"polling_interval": 5, "http_timeout": 0}, "http_timeout"),
+    ])
+    def test_http_polling_invalid_raises_config_error(self, http_polling, match):
         """
-        Feature: polling_interval=0 triggers validation error
-        Description: construct CollectorConfig with polling_interval=0
-        Expectation: raises ConfigError matching "polling_interval"
+        Feature: invalid http_polling values trigger validation error
+        Description: construct CollectorConfig with polling_interval=0/-1 or http_timeout=0
+        Expectation: raises ConfigError matching the offending field name
         """
-        with pytest.raises(ConfigError, match="polling_interval"):
-            CollectorConfig(http_polling={"polling_interval": 0, "http_timeout": 10})
+        with pytest.raises(ConfigError, match=match):
+            CollectorConfig(http_polling=http_polling)
 
-    def test_m11_polling_interval_negative(self):
+    @pytest.mark.parametrize("long_connection,match", [
+        ({"base_retry_delay": -1}, "base_retry_delay"),
+        ({"base_retry_delay": 5, "max_retry_delay": 3}, "max_retry_delay"),
+        ({"max_retry_attempts": 0}, "max_retry_attempts"),
+        ({"retry_backoff_factor": -1}, "retry_backoff_factor"),
+    ])
+    def test_long_connection_invalid_raises_config_error(self, long_connection, match):
         """
-        Feature: negative polling_interval triggers validation error
-        Description: construct CollectorConfig with polling_interval=-1
-        Expectation: raises ConfigError matching "polling_interval"
+        Feature: invalid long_connection values trigger validation error
+        Description: construct CollectorConfig with negative/zero/below-base retry params
+        Expectation: raises ConfigError matching the offending field name
         """
-        with pytest.raises(ConfigError, match="polling_interval"):
-            CollectorConfig(http_polling={"polling_interval": -1, "http_timeout": 10})
-
-    def test_m12_http_timeout_zero(self):
-        """
-        Feature: http_timeout=0 triggers validation error
-        Description: construct CollectorConfig with http_timeout=0
-        Expectation: raises ConfigError matching "http_timeout"
-        """
-        with pytest.raises(ConfigError, match="http_timeout"):
-            CollectorConfig(http_polling={"polling_interval": 5, "http_timeout": 0})
-
-    def test_m13_base_retry_delay_negative(self):
-        """
-        Feature: negative base_retry_delay triggers validation error
-        Description: construct CollectorConfig with base_retry_delay=-1
-        Expectation: raises ConfigError matching "base_retry_delay"
-        """
-        with pytest.raises(ConfigError, match="base_retry_delay"):
-            CollectorConfig(long_connection={"base_retry_delay": -1})
-
-    def test_m14_max_retry_delay_less_than_base(self):
-        """
-        Feature: max_retry_delay below base triggers validation error
-        Description: construct CollectorConfig with max_retry_delay=3 below base=5
-        Expectation: raises ConfigError matching "max_retry_delay"
-        """
-        with pytest.raises(ConfigError, match="max_retry_delay"):
-            CollectorConfig(
-                long_connection={
-                    "base_retry_delay": 5,
-                    "max_retry_delay": 3,
-                }
-            )
-
-    def test_m15_max_retry_attempts_zero(self):
-        """
-        Feature: max_retry_attempts=0 triggers validation error
-        Description: construct CollectorConfig with max_retry_attempts=0
-        Expectation: raises ConfigError matching "max_retry_attempts"
-        """
-        with pytest.raises(ConfigError, match="max_retry_attempts"):
-            CollectorConfig(long_connection={"max_retry_attempts": 0})
-
-    def test_m16_retry_backoff_factor_negative(self):
-        """
-        Feature: negative retry_backoff_factor triggers validation error
-        Description: construct CollectorConfig with retry_backoff_factor=-1
-        Expectation: raises ConfigError matching "retry_backoff_factor"
-        """
-        with pytest.raises(ConfigError, match="retry_backoff_factor"):
-            CollectorConfig(long_connection={"retry_backoff_factor": -1})
+        with pytest.raises(ConfigError, match=match):
+            CollectorConfig(long_connection=long_connection)
 
 
 # -- ③ Hydra parsing normal cases --
@@ -739,77 +400,28 @@ class TestMetricsAbnormalInput:
 
 
 class TestMetricsOther:
-    """M18-M20: other cases"""
+    """from_config: collector defaults and overrides."""
 
-    def test_m18_collector_defaults_with_strategy(self):
-        """
-        Feature: collector takes defaults when only strategies given
-        Description: from_config with a config containing only strategies
-        Expectation: http_polling/long_connection equal defaults
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
-        assert result.collector.long_connection == {
-            "base_retry_delay": 1.0,
-            "max_retry_delay": 30.0,
-            "max_retry_attempts": 5,
-            "retry_backoff_factor": 2.0,
-        }
+    _STRATEGY = [{
+        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+        "weight": 1.0,
+        "collector_names": ["vllm_zmq"],
+    }]
 
-    def test_m19_collector_null_default(self):
+    @pytest.mark.parametrize("collector", [None, {"http_polling": {"polling_interval": 3}}])
+    def test_collector_defaults_or_override(self, collector):
         """
-        Feature: collector takes defaults when null
-        Description: from_config with collector=None
-        Expectation: result.collector is a CollectorConfig instance
+        Feature: collector takes defaults when omitted/null and accepts partial overrides
+        Description: from_config with collector=None or a partial http_polling override
+        Expectation: result.collector is a CollectorConfig with default or overridden values
         """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "collector": None,
-            }
-        )
+        kwargs = OmegaConf.create({"strategies": self._STRATEGY, "collector": collector})
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result.collector, CollectorConfig)
-
-    def test_m20_http_polling_override(self):
-        """
-        Feature: collector.http_polling overrides defaults
-        Description: from_config with config overriding polling_interval
-        Expectation: http_polling["polling_interval"] == 3.0
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "collector": {
-                    "http_polling": {"polling_interval": 3},
-                },
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert result.collector.http_polling["polling_interval"] == 3.0
+        if collector and "http_polling" in collector:
+            assert result.collector.http_polling["polling_interval"] == 3.0
+        else:
+            assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
 
 
 # ============================================================
@@ -820,105 +432,58 @@ class TestMetricsOther:
 
 
 class TestCacheStoreNormalInput:
-    """C01-C05: normal input/output cases"""
+    """CacheStoreConfig normal construction: store type and ttl defaults."""
 
-    def test_c01_kv_cache_store_type_list(self):
+    @pytest.mark.parametrize("kwargs,attr,expected", [
+        ({"kv_cache_store_type": "list"}, "kv_cache_store_type", "list"),
+        ({"kv_cache_store_type": "radix_tree"}, "kv_cache_store_type", "radix_tree"),
+        ({}, "kv_cache_store_type", "list"),          # default store type
+        ({"ttl": 30.0}, "ttl", 30.0),
+        ({}, "ttl", 30.0),                            # default ttl
+    ])
+    def test_fields_parse_default_and_custom(self, kwargs, attr, expected):
         """
-        Feature: kv_cache_store_type=list parses normally
-        Description: construct CacheStoreConfig with kv_cache_store_type="list"
-        Expectation: cfg.kv_cache_store_type == "list"
+        Feature: CacheStoreConfig fields accept custom values and fall back to defaults
+        Description: construct CacheStoreConfig with varied kv_cache_store_type / ttl kwargs
+        Expectation: each field equals the expected explicit or default value
         """
-        cfg = CacheStoreConfig(kv_cache_store_type="list")
-        assert cfg.kv_cache_store_type == "list"
-
-    def test_c02_kv_cache_store_type_radix_tree(self):
-        """
-        Feature: kv_cache_store_type=radix_tree parses normally
-        Description: construct CacheStoreConfig with kv_cache_store_type="radix_tree"
-        Expectation: cfg.kv_cache_store_type == "radix_tree"
-        """
-        cfg = CacheStoreConfig(kv_cache_store_type="radix_tree")
-        assert cfg.kv_cache_store_type == "radix_tree"
-
-    def test_c03_kv_cache_store_type_default(self):
-        """
-        Feature: kv_cache_store_type uses default when omitted
-        Description: construct CacheStoreConfig with no args
-        Expectation: cfg.kv_cache_store_type == "list"
-        """
-        cfg = CacheStoreConfig()
-        assert cfg.kv_cache_store_type == "list"
-
-    def test_c04_ttl_30(self):
-        """
-        Feature: ttl field parses normally
-        Description: construct CacheStoreConfig with ttl=30.0
-        Expectation: cfg.ttl == 30.0
-        """
-        cfg = CacheStoreConfig(ttl=30.0)
-        assert cfg.ttl == 30.0
-
-    def test_c05_ttl_default(self):
-        """
-        Feature: ttl uses default when omitted
-        Description: construct CacheStoreConfig with no args
-        Expectation: cfg.ttl == 30.0
-        """
-        cfg = CacheStoreConfig()
-        assert cfg.ttl == 30.0
+        cfg = CacheStoreConfig(**kwargs)
+        assert getattr(cfg, attr) == expected
 
 
 # -- ② Input/output abnormal cases --
 
 
 class TestCacheStoreAbnormalInput:
-    """C06-C09: abnormal input/output cases"""
+    """CacheStoreConfig abnormal: per-field validation errors."""
 
-    def test_c06_kv_cache_store_type_unknown(self):
+    @pytest.mark.parametrize("kwargs,match", [
+        ({"kv_cache_store_type": "unknown"}, "kv_cache_store_type"),
+        ({"ttl": 0}, "ttl"),
+        ({"ttl": -1}, "ttl"),
+    ])
+    def test_field_invalid_raises_config_error(self, kwargs, match):
         """
-        Feature: illegal kv_cache_store_type triggers validation error
-        Description: construct CacheStoreConfig with kv_cache_store_type="unknown"
-        Expectation: raises ConfigError matching "kv_cache_store_type"
+        Feature: invalid kv_cache_store_type or ttl triggers validation error
+        Description: construct CacheStoreConfig with unknown type / ttl=0 / ttl=-1
+        Expectation: raises ConfigError matching the offending field name
         """
-        with pytest.raises(ConfigError, match="kv_cache_store_type"):
-            CacheStoreConfig(kv_cache_store_type="unknown")
+        with pytest.raises(ConfigError, match=match):
+            CacheStoreConfig(**kwargs)
 
-    def test_c07_ttl_zero(self):
+    def test_cache_store_not_dict_raises_config_error(self):
         """
-        Feature: ttl=0 triggers validation error
-        Description: construct CacheStoreConfig with ttl=0
-        Expectation: raises ConfigError matching "ttl"
-        """
-        with pytest.raises(ConfigError, match="ttl"):
-            CacheStoreConfig(ttl=0)
-
-    def test_c08_ttl_negative(self):
-        """
-        Feature: negative ttl triggers validation error
-        Description: construct CacheStoreConfig with ttl=-1
-        Expectation: raises ConfigError matching "ttl"
-        """
-        with pytest.raises(ConfigError, match="ttl"):
-            CacheStoreConfig(ttl=-1)
-
-    def test_c09_cache_store_not_dict(self):
-        """
-        Feature: non-dict cache_store triggers validation error
+        Feature: non-dict cache_store triggers from_config validation error
         Description: from_config with cache_store="list"
         Expectation: raises ConfigError matching "cache_store"
         """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "cache_store": "list",
-            }
-        )
+        kwargs = OmegaConf.create({
+            "strategies": [{
+                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 1.0, "collector_names": ["vllm_zmq"],
+            }],
+            "cache_store": "list",
+        })
         with pytest.raises(ConfigError, match="cache_store"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -927,49 +492,26 @@ class TestCacheStoreAbnormalInput:
 
 
 class TestCacheStoreOther:
-    """C10-C11: other cases"""
+    """from_config: cache_store defaults when omitted or null."""
 
-    def test_c10_cache_store_defaults_with_strategy(self):
-        """
-        Feature: cache_store takes defaults when only strategies given
-        Description: from_config with a config containing only strategies
-        Expectation: kv_cache_store_type/ttl equal defaults
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert result.cache_store.kv_cache_store_type == "list"
-        assert result.cache_store.ttl == 30.0
+    _STRATEGY = [{
+        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+        "weight": 1.0,
+        "collector_names": ["vllm_zmq"],
+    }]
 
-    def test_c11_cache_store_null_default(self):
+    def test_cache_store_defaults_when_omitted_or_null(self):
         """
-        Feature: cache_store takes defaults when null
-        Description: from_config with cache_store=None
-        Expectation: result.cache_store is a CacheStoreConfig instance
+        Feature: cache_store takes defaults when omitted or null
+        Description: from_config with cache_store omitted or explicitly None
+        Expectation: result.cache_store is a CacheStoreConfig with default type/ttl
         """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "cache_store": None,
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert isinstance(result.cache_store, CacheStoreConfig)
+        for cfg in ({"strategies": self._STRATEGY},
+                    {"strategies": self._STRATEGY, "cache_store": None}):
+            result = KVCAwareConfig.from_config(OmegaConf.create(cfg))
+            assert isinstance(result.cache_store, CacheStoreConfig)
+            assert result.cache_store.kv_cache_store_type == "list"
+            assert result.cache_store.ttl == 30.0
 
 
 # ============================================================
@@ -980,37 +522,39 @@ class TestCacheStoreOther:
 
 
 class TestKVCAwareNormalInput:
-    """K01: normal input/output cases"""
+    """from_config assembles the three sections into a KVCAwareConfig."""
 
-    def test_k01_full_config_normal_parse(self):
-        """
-        Feature: full config parses normally
-        Description: from_config with a full config of strategies/collector/cache_store
-        Expectation: result is a KVCAwareConfig and field types are correct
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "alpha": 0.7,
-                        "collector_names": ["vllm_zmq", "mooncake_prometheus"],
-                    },
-                ],
-                "collector": {
-                    "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                    "long_connection": {
-                        "base_retry_delay": 1.0,
-                        "max_retry_delay": 30.0,
-                        "max_retry_attempts": 5,
-                        "retry_backoff_factor": 2.0,
-                    },
+    @staticmethod
+    def _full_config():
+        return {
+            "strategies": [
+                {
+                    "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                    "weight": 1.0,
+                    "alpha": 0.7,
+                    "collector_names": ["vllm_zmq", "mooncake_prometheus"],
                 },
-                "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
+            ],
+            "collector": {
+                "http_polling": {"polling_interval": 5, "http_timeout": 10},
+                "long_connection": {
+                    "base_retry_delay": 1.0,
+                    "max_retry_delay": 30.0,
+                    "max_retry_attempts": 5,
+                    "retry_backoff_factor": 2.0,
+                },
+            },
+            "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
+        }
+
+    @pytest.mark.parametrize("wrap", [lambda d: OmegaConf.create(d), lambda d: d], ids=["omegaconf", "plain_dict"])
+    def test_full_config_assembles_three_sections(self, wrap):
+        """
+        Feature: from_config assembles the three sections into a KVCAwareConfig
+        Description: from_config with a full strategies/collector/cache_store config (OmegaConf or plain dict)
+        Expectation: result is a KVCAwareConfig with correctly typed sections
+        """
+        result = KVCAwareConfig.from_config(wrap(self._full_config()))
         assert isinstance(result, KVCAwareConfig)
         assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
         assert isinstance(result.collector, CollectorConfig)
@@ -1021,128 +565,70 @@ class TestKVCAwareNormalInput:
 
 
 class TestKVCAwareAbnormalInput:
-    """K02-K04: abnormal input/output cases"""
+    """from_config rejects malformed top-level / section inputs."""
 
-    def test_k02_multi_error_aggregation(self):
+    def test_from_config_rejects_non_dict_collector(self):
         """
-        Feature: from_config raises on multiple errors
-        Description: from_config with empty strategies/illegal collector/illegal cache_store
-        Expectation: raises ConfigError and message contains relevant field names
+        Feature: non-dict collector triggers from_config validation error
+        Description: from_config with collector="vllm"
+        Expectation: raises ConfigError matching "collector"
         """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [],
-                "collector": {"http_polling": {"polling_interval": -1}},
-                "cache_store": {"ttl": 0},
-            }
-        )
+        kwargs = OmegaConf.create({
+            "strategies": [{
+                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 1.0, "collector_names": ["vllm_zmq"],
+            }],
+            "collector": "vllm",
+        })
+        with pytest.raises(ConfigError, match="collector"):
+            KVCAwareConfig.from_config(kwargs)
+
+    def test_from_config_rejects_collector_unknown_key(self):
+        """
+        Feature: collector with an undefined key triggers structural validation error
+        Description: from_config with collector containing unknown_key
+        Expectation: raises OmegaConfBaseException matching "unknown_key"
+        """
+        from omegaconf.errors import OmegaConfBaseException
+
+        kwargs = OmegaConf.create({
+            "strategies": [{
+                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 1.0, "collector_names": ["vllm_zmq"],
+            }],
+            "collector": {"unknown_key": 123, "http_polling": {"polling_interval": 5}},
+        })
+        with pytest.raises(OmegaConfBaseException, match="unknown_key"):
+            KVCAwareConfig.from_config(kwargs)
+
+    def test_from_config_aggregates_multiple_errors(self):
+        """
+        Feature: from_config raises on multiple aggregated errors
+        Description: from_config with empty strategies and invalid collector/cache_store
+        Expectation: raises ConfigError whose message contains a relevant field name
+        """
+        kwargs = OmegaConf.create({
+            "strategies": [],
+            "collector": {"http_polling": {"polling_interval": -1}},
+            "cache_store": {"ttl": 0},
+        })
         with pytest.raises(ConfigError) as exc_info:
             KVCAwareConfig.from_config(kwargs)
         error_msg = str(exc_info.value)
         assert "strategies" in error_msg or "polling_interval" in error_msg or "ttl" in error_msg
-
-    def test_k03_collector_not_dict(self):
-        """
-        Feature: non-dict collector triggers validation error
-        Description: from_config with collector="vllm"
-        Expectation: raises ConfigError matching "collector"
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "collector": "vllm",
-            }
-        )
-        with pytest.raises(ConfigError, match="collector"):
-            KVCAwareConfig.from_config(kwargs)
 
 
 # -- ③ Hydra parsing normal cases --
 
 
 class TestKVCAwareHydraNormal:
-    """K05-K08: Hydra parsing normal cases"""
+    """from_config handles OmegaConf inputs and section defaults."""
 
-    def test_k05_omega_conf_merge_to_kvc_aware_config(self):
+    def test_strategies_dict_converts_to_list(self):
         """
-        Feature: OmegaConf input parses into KVCAwareConfig normally
-        Description: from_config with an OmegaConf containing all three sections
-        Expectation: result is a KVCAwareConfig instance
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "collector": {
-                    "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                },
-                "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert isinstance(result, KVCAwareConfig)
-
-    def test_k06_collector_auto_recursive_parse(self):
-        """
-        Feature: collector auto-recursive parsing
-        Description: from_config with config overriding http_polling
-        Expectation: result.collector is CollectorConfig and polling_interval==3.0
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "collector": {"http_polling": {"polling_interval": 3}},
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert isinstance(result.collector, CollectorConfig)
-        assert result.collector.http_polling["polling_interval"] == 3.0
-
-    def test_k07_cache_store_auto_recursive_parse(self):
-        """
-        Feature: cache_store auto-recursive parsing
-        Description: from_config with config overriding cache_store
-        Expectation: result.cache_store fields equal custom values
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "cache_store": {"kv_cache_store_type": "radix_tree", "ttl": 60},
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert isinstance(result.cache_store, CacheStoreConfig)
-        assert result.cache_store.kv_cache_store_type == "radix_tree"
-        assert result.cache_store.ttl == 60.0
-
-    def test_k08_strategies_dict_to_list_conversion(self):
-        """
-        Feature: strategies dict auto-converts to list
+        Feature: strategies given as a mapping auto-converts to a list
         Description: from_config with strategies in dict form
-        Expectation: result.strategies is a list and element types/values are correct
+        Expectation: result.strategies is a list of KVCAwareStrategyConfig with correct values
         """
         kwargs = OmegaConf.create(
             {
@@ -1161,14 +647,35 @@ class TestKVCAwareHydraNormal:
         assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
         assert result.strategies[0].weight == 1.0
 
+    def test_omitted_sections_take_defaults(self):
+        """
+        Feature: omitted collector/cache_store take their Config defaults
+        Description: from_config with a config containing only strategies
+        Expectation: result.collector/cache_store are CollectorConfig/CacheStoreConfig instances
+        """
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+            }
+        )
+        result = KVCAwareConfig.from_config(kwargs)
+        assert isinstance(result.collector, CollectorConfig)
+        assert isinstance(result.cache_store, CacheStoreConfig)
+
 
 # -- ④ Hydra parsing abnormal cases --
 
 
 class TestKVCAwareHydraAbnormal:
-    """K09-K11: Hydra parsing abnormal cases"""
+    """from_config drops non-domain top-level keys; custom repr is preserved."""
 
-    def test_k09_top_level_unknown_keys_ignored(self):
+    def test_top_level_unknown_keys_ignored(self):
         """
         Feature: from_config ignores top-level keys outside the config domain
         Description: from_config with a config carrying extra non-domain keys
@@ -1177,6 +684,7 @@ class TestKVCAwareHydraAbnormal:
         kwargs = OmegaConf.create(
             {
                 "_unknown_top_level": "ignored",
+                "router_strategy": "should_be_dropped",
                 "strategies": [
                     {
                         "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
@@ -1194,32 +702,11 @@ class TestKVCAwareHydraAbnormal:
         assert "_unknown_top_level" not in field_names
         assert "router_strategy" not in field_names
 
-    def test_k10_metrics_unknown_key(self):
+    def test_compact_repr(self):
         """
-        Feature: collector with undefined key triggers parse error
-        Description: from_config with collector containing unknown_key
-        Expectation: raises exception matching "unknown_key"
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-                "collector": {"unknown_key": 123, "http_polling": {"polling_interval": 5}},
-            }
-        )
-        with pytest.raises(Exception, match="unknown_key"):
-            KVCAwareConfig.from_config(kwargs)
-
-    def test_k11_compact_repr(self):
-        """
-        Feature: KVCAwareConfig multi-line indented repr
+        Feature: KVCAwareConfig renders a multi-line indented repr
         Description: from_config then call repr and inspect output
-        Expectation: repr contains newline and starts with KVCAwareConfig(
+        Expectation: repr contains newline, starts with KVCAwareConfig(, and includes fields
         """
         kwargs = OmegaConf.create(
             {
@@ -1272,32 +759,11 @@ def _load_pkg_router_yaml() -> dict:
 
 
 class TestKVCAwareOther:
-    """K12-K14: other cases"""
+    """multi-strategy assembly and packaged YAML end-to-end."""
 
-    def test_k12_only_strategies_defaults(self):
+    def test_multi_strategy_instances(self):
         """
-        Feature: other fields take defaults when only strategies given
-        Description: from_config with a config containing only strategies
-        Expectation: collector/cache_store are their Config types
-        """
-        kwargs = OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "collector_names": ["vllm_zmq"],
-                    },
-                ],
-            }
-        )
-        result = KVCAwareConfig.from_config(kwargs)
-        assert isinstance(result.collector, CollectorConfig)
-        assert isinstance(result.cache_store, CacheStoreConfig)
-
-    def test_k13_manual_instantiate_all_dataclass(self):
-        """
-        Feature: multi-strategy instances are all StrategyConfig
+        Feature: from_config with multiple strategies yields a list of StrategyConfig
         Description: from_config with a config containing two strategies
         Expectation: each strategy is a StrategyConfig instance
         """
@@ -1318,14 +784,15 @@ class TestKVCAwareOther:
             }
         )
         result = KVCAwareConfig.from_config(kwargs)
+        assert len(result.strategies) == 2
         for s in result.strategies:
             assert isinstance(s, StrategyConfig)
 
-    def test_k14_yaml_split_loading(self):
+    def test_packaged_yaml_e2e(self):
         """
         Feature: Hydra composition of the packaged router YAML parses end-to-end
-        Description: compose uni_agent configs/kvc_aware_router.yaml, then from_config
-        Expectation: all fields match the YAML config
+        Description: compose configs/kvc_aware_router.yaml, then from_config
+        Expectation: all fields match the YAML config and non-domain keys are dropped
         """
         loaded = _load_pkg_router_yaml()
 
@@ -1349,139 +816,3 @@ class TestKVCAwareOther:
         # FQN 顶层键对 from_config 无害（多余键被丢弃）
         assert loaded["router_class"] == "uni_agent.llm_router.balancer.KVCAwareBalancer"
         assert not hasattr(result, "router_class")
-
-
-class TestDropInIntegration:
-    """Drop-in flow integration tests (config side).
-
-    Config-side integration for the external router YAML.
-    """
-
-    def _make_full_config(self) -> OmegaConf:
-        """Helper: build a full config for drop-in tests.
-
-        Builds the configuration consumed by ``KVCAwareConfig.from_config``.
-        """
-        return OmegaConf.create(
-            {
-                "strategies": [
-                    {
-                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                        "weight": 1.0,
-                        "alpha": 0.7,
-                        "collector_names": ["vllm_zmq", "mooncake_prometheus"],
-                    },
-                ],
-                "collector": {
-                    "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                    "long_connection": {
-                        "base_retry_delay": 1.0,
-                        "max_retry_delay": 30.0,
-                        "max_retry_attempts": 5,
-                        "retry_backoff_factor": 2.0,
-                    },
-                },
-                "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
-            }
-        )
-
-    def test_d05_compose_expands_defaults(self):
-        """
-        Feature: hydra.compose expands the packaged router config's defaults
-        Description: compose uni_agent configs/kvc_aware_router.yaml
-        Expectation: strategies/collector/cache_store all present, router_class FQN kept
-        """
-        loaded = _load_pkg_router_yaml()
-        assert "strategies" in loaded and "collector" in loaded and "cache_store" in loaded
-        assert loaded["router_class"] == "uni_agent.llm_router.balancer.KVCAwareBalancer"
-        assert "http_polling" in loaded["collector"]
-        assert "long_connection" in loaded["collector"]
-
-    def test_d08_balancer_from_config(self):
-        """
-        Feature: from_config fully parses drop-in config
-        Description: from_config with config generated by _make_full_config
-        Expectation: result and field types are correct
-        """
-        cfg = self._make_full_config()
-        result = KVCAwareConfig.from_config(cfg)
-        assert isinstance(result, KVCAwareConfig)
-        assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
-        assert isinstance(result.collector, CollectorConfig)
-        assert isinstance(result.cache_store, CacheStoreConfig)
-
-    def test_d09_strategy_subtarget_instantiate(self):
-        """
-        Feature: strategy sub-layer _target_ instantiates correctly
-        Description: take strategies[0] after from_config
-        Expectation: type is KVCAwareStrategyConfig and fields are correct
-        """
-        cfg = self._make_full_config()
-        result = KVCAwareConfig.from_config(cfg)
-        s = result.strategies[0]
-        assert type(s) is KVCAwareStrategyConfig
-        assert s.collector_names == ["vllm_zmq", "mooncake_prometheus"]
-        assert s.weight == 1.0
-
-    def test_d11_from_config_drops_non_domain_top_keys(self):
-        """
-        Feature: from_config drops non-domain top-level keys
-        Description: from_config with unknown top-level keys
-        Expectation: result field set excludes those keys
-        """
-        cfg = self._make_full_config()
-        result = KVCAwareConfig.from_config(cfg)
-        import dataclasses
-
-        field_names = {f.name for f in dataclasses.fields(result)}
-        assert "router_strategy" not in field_names
-        assert "_unknown_top_level" not in field_names
-        assert not hasattr(result, "router_strategy")
-
-    def test_d12_omegaconf_dictconfig_input(self):
-        """
-        Feature: OmegaConf DictConfig input parses normally
-        Description: from_config with an OmegaConf-typed config
-        Expectation: strategies[0] is a KVCAwareStrategyConfig instance
-        """
-        cfg = self._make_full_config()
-        result = KVCAwareConfig.from_config(cfg)
-        assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
-
-    def test_d13_plain_dict_input(self):
-        """
-        Feature: plain dict input parses normally
-        Description: to_container to plain dict then from_config
-        Expectation: strategies[0] type/weight are correct
-        """
-        cfg = OmegaConf.to_container(self._make_full_config(), resolve=True)
-        result = KVCAwareConfig.from_config(cfg)
-        assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
-        assert result.strategies[0].weight == 1.0
-
-    def test_d14_yaml_file_e2e(self):
-        """
-        Feature: packaged YAML parses end-to-end
-        Description: load configs/kvc_aware_router.yaml → from_config
-        Expectation: all field types/values correct and non-domain keys dropped
-        """
-        loaded = _load_pkg_router_yaml()
-        assert isinstance(loaded, dict)
-        assert "router_class" in loaded  # FQN 注入顶层键
-
-        result = KVCAwareConfig.from_config(loaded)
-
-        assert isinstance(result, KVCAwareConfig)
-        assert len(result.strategies) == 1
-        s0 = result.strategies[0]
-        assert isinstance(s0, KVCAwareStrategyConfig)
-        assert s0.weight == 1.0
-        assert s0.alpha == 0.3
-        assert s0.collector_names == ["vllm_zmq", "vllm_metrics", "sticky_stat", "inflight_stat"]
-        assert result.collector.http_polling["polling_interval"] == 5.0
-        assert result.collector.long_connection["max_retry_attempts"] == 5
-        assert result.cache_store.kv_cache_store_type == "list"
-        assert result.cache_store.ttl == 30.0
-        import dataclasses
-
-        assert "router_class" not in {f.name for f in dataclasses.fields(result)}

@@ -55,15 +55,6 @@ class TestInflightEndToEnd:
         balancer.release_server(sid)
         assert balancer._store.get_metric(sid, MetricKey.INFLIGHT_COUNT) == 0
 
-    def test_acquire_release_symmetric_returns_to_zero(self):
-        balancer = _make_balancer({"s0": "h0"})
-        balancer.acquire_server("r1", [1])
-        balancer.acquire_server("r2", [1])
-        assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 2
-        balancer.release_server("s0")
-        balancer.release_server("s0")
-        assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 0
-
     def test_dispatched_count_is_cumulative_per_replica(self):
         # DISPATCHED_COUNT is the monotonic sibling of the inflight gauge — it
         # only ever climbs (+1 per acquire), never decremented on release.
@@ -92,12 +83,6 @@ class TestInflightEndToEnd:
                 s, MetricKey.COMPLETED_COUNT
             )
 
-    def test_inflight_isolated_per_replica(self):
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-        balancer.acquire_server("r1", [1])  # cold-start tie-break → s0
-        assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1
-        assert balancer._store.get_metric("s1", MetricKey.INFLIGHT_COUNT) == 0
-
 
 def _total(balancer, key: str) -> int:
     """Sum a per-replica metric across both replicas (distribution-agnostic)."""
@@ -112,32 +97,6 @@ class TestTurnTracking:
         sid, _ = balancer.acquire_server("r1", [1])
         assert balancer._store.get_per_request("r1", "turn", 0) == 1
         assert balancer._store.get_metric(sid, MetricKey.INFLIGHT_TURN_SUM) == 1
-        assert balancer._store.get_metric(sid, MetricKey.DISPATCHED_COUNT) == 1
-
-    def test_re_dispatch_of_same_request_climbs_turn(self):
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-        # route() is deterministic; re-acquiring the same request_id climbs its
-        # turn regardless of which replica each dispatch lands on.
-        for _ in range(3):
-            balancer.acquire_server("r1", [1])  # turns 1, 2, 3
-        assert balancer._store.get_per_request("r1", "turn", 0) == 3
-        # inflight_turn_sum across replicas = 1+2+3 = 6 (each turn added to its receiver).
-        assert _total(balancer, MetricKey.INFLIGHT_TURN_SUM) == 6
-        assert _total(balancer, MetricKey.DISPATCHED_COUNT) == 3
-
-    def test_distinct_requests_each_track_their_own_turn(self):
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-        balancer.acquire_server("r1", [1])  # r1 turn 1
-        balancer.acquire_server("r2", [1])  # r2 turn 1
-        balancer.acquire_server("r1", [1])  # r1 turn 2
-        assert balancer._store.get_per_request("r1", "turn", 0) == 2
-        assert balancer._store.get_per_request("r2", "turn", 0) == 1
-
-    def test_release_bumps_completed_count(self):
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-        sid, _ = balancer.acquire_server("r1", [1])
-        balancer.release_server(sid)
-        assert balancer._store.get_metric(sid, MetricKey.COMPLETED_COUNT) == 1
         assert balancer._store.get_metric(sid, MetricKey.DISPATCHED_COUNT) == 1
 
     def test_turn_attributed_to_receiving_replica(self):

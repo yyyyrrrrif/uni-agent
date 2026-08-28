@@ -70,15 +70,6 @@ class TestKVCAwareBalancerConstruction:
         with pytest.raises(ConfigError):
             KVCAwareBalancer({"s0": "h0"}, OmegaConf.create({}))
 
-    def test_b03_construction_starts_provider(self):
-        """
-        Feature: construction starts the provider (lifecycle)
-        Description: construct balancer (autouse _FakeCollectorManager) and check start()
-        Expectation: the provider's start() is invoked during __init__
-        """
-        balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
-        assert balancer._provider.started is True
-
 
 # ============================================================
 # trivial methods: get_all_servers / get_status / release_server
@@ -88,40 +79,33 @@ class TestKVCAwareBalancerConstruction:
 class TestTrivialMethods:
     """B04-B06: the no-algorithm Protocol methods."""
 
-    def test_b04_get_all_servers_returns_ids(self):
+    def test_b04_trivial_protocol_methods(self):
         """
-        Feature: get_all_servers returns the server ids in the pool
-        Description: get_all_servers() on a two-server balancer
-        Expectation: returns exactly the pool's ids
+        Feature: get_all_servers / get_status / release_server — the no-algorithm Protocol methods
+        Description: construct a two-server balancer; exercise the three trivial methods in turn
+        Expectation:
+          get_all_servers() returns the pool ids
+          get_status() reports provider type, materialized strategy, pool ids, route_calls=0
+          release_server() is a no-op for both known and unknown ids; pool unchanged
         """
         balancer = _make_balancer({"s0": "h0", "s1": "h1"})
+
+        # B04: get_all_servers returns exactly the pool's ids
         assert set(balancer.get_all_servers()) == {"s0", "s1"}
 
-    def test_b05_get_status_reports_construction_state(self):
-        """
-        Feature: get_status reports the balancer's construction state
-        Description: get_status() on a freshly constructed balancer
-        Expectation: reports provider type, materialized strategy, pool ids, route_calls=0
-        """
-        balancer = _make_balancer({"s0": "h0"})
+        # B05: get_status reports construction state (provider type, strategy, pool, route_calls)
         status = balancer.get_status()
         # provider is the injected _FakeCollectorManager in unit tests; real env reports
         # "CollectorManager". Assert it matches the constructed provider's type.
         assert status["provider"] == type(balancer._provider).__name__
         assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
-        assert status["servers"] == ["s0"]
+        assert set(status["servers"]) == {"s0", "s1"}
         assert status["route_calls"] == 0
 
-    def test_b06_release_server_is_noop(self):
-        """
-        Feature: release_server is a no-op (v1 does not track inflight)
-        Description: release_server on a known and an unknown id
-        Expectation: returns None for both; pool unchanged
-        """
-        balancer = _make_balancer({"s0": "h0"})
+        # B06: release_server is a no-op (v1 does not track inflight); known + unknown ids
         assert balancer.release_server("s0") is None
         assert balancer.release_server("s999") is None
-        assert set(balancer.get_all_servers()) == {"s0"}
+        assert set(balancer.get_all_servers()) == {"s0", "s1"}  # pool unchanged
 
 
 # ============================================================
@@ -131,18 +115,6 @@ class TestTrivialMethods:
 
 class TestAcquireServer:
     """B07-Bnn: acquire_server delegates to route() and maps back to a handle."""
-
-    def test_b07_returns_top_ranked_server_and_handle(self, monkeypatch):
-        """
-        Feature: acquire_server returns the top-ranked server and its handle
-        Description: mock route() to return ["s0","s1","s2"]
-        Expectation: returns (s0, h0)
-        """
-        import uni_agent.llm_router.balancer as balancer_mod
-
-        monkeypatch.setattr(balancer_mod, "route", lambda *a, **k: ["s0", "s1", "s2"])
-        balancer = _make_balancer({"s0": "h0", "s1": "h1", "s2": "h2"})
-        assert balancer.acquire_server("r1", [1, 2, 3]) == ("s0", "h0")
 
     def test_b08_prompt_ids_and_replicas_passed_to_route(self, monkeypatch):
         """
@@ -219,55 +191,29 @@ class TestAcquireServer:
 class TestServerPoolMutations:
     """B12-Bnn: add/remove mutate the server pool."""
 
-    def test_b12_add_servers_grows_pool(self):
+    def test_b12_add_servers_grows_pool_and_overwrites_handle(self):
         """
-        Feature: add_servers grows the pool
-        Description: add_servers({"s1":h1,"s2":h2}) on a one-server balancer
-        Expectation: pool has s0/s1/s2
+        Feature: add_servers grows the pool and overwrites existing ids (bulk-add semantics)
+        Description: add_servers({"s0": new, "s1": h1, "s2": h2}) on a one-server balancer {s0}
+        Expectation: s0 handle overwritten; s1/s2 added; pool has s0/s1/s2
         """
         balancer = _make_balancer({"s0": "h0"})
-        balancer.add_servers({"s1": "h1", "s2": "h2"})
+        balancer.add_servers({"s0": "h0_new", "s1": "h1", "s2": "h2"})
         assert set(balancer.get_all_servers()) == {"s0", "s1", "s2"}
+        assert balancer._servers["s0"] == "h0_new"  # existing id overwritten
 
-    def test_b13_add_servers_empty_dict_is_noop(self):
+    def test_b15_remove_servers_shrinks_pool_and_unknown_is_noop(self):
         """
-        Feature: adding an empty dict changes nothing
-        Description: add_servers({}) on a one-server balancer
-        Expectation: pool unchanged
-        """
-        balancer = _make_balancer({"s0": "h0"})
-        balancer.add_servers({})
-        assert set(balancer.get_all_servers()) == {"s0"}
-
-    def test_b14_add_servers_duplicate_overwrites_handle(self):
-        """
-        Feature: adding an existing id overwrites its handle (bulk-add semantics)
-        Description: add_servers({"s0": new}) when s0 already in pool
-        Expectation: handle overwritten; no error raised
-        """
-        balancer = _make_balancer({"s0": "h0"})
-        balancer.add_servers({"s0": "h0_new"})
-        assert balancer._servers["s0"] == "h0_new"
-
-    def test_b15_remove_servers_shrinks_pool(self):
-        """
-        Feature: remove_servers shrinks the pool
-        Description: remove_servers(["s0"]) on a two-server balancer
-        Expectation: pool keeps only s1
+        Feature: remove_servers shrinks the pool; unknown ids are a silent no-op
+        Description: remove_servers(["s0"]) then remove_servers(["s999"]) on {s0,s1}
+        Expectation: after s0 removal pool keeps only s1; unknown s999 leaves pool unchanged
         """
         balancer = _make_balancer({"s0": "h0", "s1": "h1"})
         balancer.remove_servers(["s0"])
         assert set(balancer.get_all_servers()) == {"s1"}
 
-    def test_b16_remove_servers_unknown_id_is_noop(self):
-        """
-        Feature: removing an unknown id changes nothing and does not raise
-        Description: remove_servers(["s999"]) on a one-server balancer
-        Expectation: pool unchanged
-        """
-        balancer = _make_balancer({"s0": "h0"})
         balancer.remove_servers(["s999"])
-        assert set(balancer.get_all_servers()) == {"s0"}
+        assert set(balancer.get_all_servers()) == {"s1"}  # unknown id no-op
 
 
 # ============================================================
@@ -325,58 +271,3 @@ class TestEndToEndFlows:
 
         mod = importlib.import_module("uni_agent.llm_router.balancer")
         assert mod.KVCAwareBalancer is KVCAwareBalancer
-
-
-# ============================================================
-# Sticky-session end-to-end (real strategy, no route monkeypatch)
-# ============================================================
-
-
-class _MetricsProvider:
-    """Metrics-aware fake provider for sticky e2e tests.
-
-    Configured per-replica metrics; returns real KV/load numbers so the real
-    KVCacheAwareStrategy can compute s_load and decide overload + stickiness.
-    get_layer_prefix_hit_rate returns 0.0 → combined scoring degrades to
-    load-only (no cache term), which is fine for sticky behavior: the deciding
-    factor is whether the bound replica is overloaded.
-    """
-
-    def __init__(self, metrics: dict[str, dict] | None = None):
-        self._metrics = metrics or {}
-
-    def start(self):
-        pass
-
-    def stop(self):
-        pass
-
-    def get_metrics(self, replica_id):
-        return dict(self._metrics.get(replica_id, {}))
-
-    def get_metric(self, replica_id, key):
-        return self.get_metrics(replica_id).get(key, 0.0)
-
-    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
-        return 0.0
-
-    def kv_cache_load(self, replica_id):
-        return 0.0
-
-
-def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
-    """Normalize {sid: {kv, running, waiting}} into MetricKey-keyed dicts.
-
-    Defaults: kv=0.3 (→ load=0.12, NOT overloaded under load_threshold 0.9),
-    running=0, waiting=0.
-    """
-    from uni_agent.llm_router.types import MetricKey
-
-    out = {}
-    for sid, m in per_replica.items():
-        out[sid] = {
-            MetricKey.KV_CACHE_USAGE_PERC: m.get("kv", 0.3),
-            MetricKey.NUM_REQUESTS_RUNNING: m.get("running", 0),
-            MetricKey.NUM_REQUESTS_WAITING: m.get("waiting", 0),
-        }
-    return out

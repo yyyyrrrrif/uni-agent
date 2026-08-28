@@ -40,22 +40,16 @@ pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
 class TestStatisticEvent:
-    def test_defaults_and_fields(self):
-        ev = StatisticEvent("on_acquire", request_id="r1", replica_id="s0")
+    def test_inputs_params(self):
+        ev = StatisticEvent("on_acquire", request_id="r1", replica_id="s0", server_ids=("s0", "s1"))
         assert ev.event == "on_acquire"
         assert ev.request_id == "r1"
         assert ev.replica_id == "s0"
-        assert ev.server_ids == ()
+        assert ev.server_ids == ("s0", "s1")
         assert ev.prompt_len == 0  # default — no prompt forwarded
 
-    def test_frozen(self):
-        ev = StatisticEvent("on_acquire")
         with pytest.raises(AttributeError):
             ev.event = "x"  # type: ignore[misc]
-
-    def test_on_servers_removed_carries_tuple(self):
-        ev = StatisticEvent("on_servers_removed", server_ids=("s0", "s1"))
-        assert ev.server_ids == ("s0", "s1")
 
 
 class TestStickyDecoder:
@@ -72,41 +66,30 @@ class TestStickyDecoder:
         assert upd.action == "invalidate_replica"
         assert upd.replica_ids == ("s0", "s1")
 
-    def test_on_release_returns_none(self):
-        assert StickyDecoder().decode(StatisticEvent("on_release", replica_id="s0"), "") is None
-
-    def test_on_acquire_missing_fields_returns_none(self):
-        assert StickyDecoder().decode(StatisticEvent("on_acquire"), "") is None
-
-    def test_non_event_payload_returns_none(self):
+    def test_return_is_none(self):
         d = StickyDecoder()
         assert d.decode(b"bytes", "") is None
         assert d.decode("str", "") is None
+        assert d.decode(StatisticEvent("on_acquire"), "") is None
+        assert d.decode(StatisticEvent("on_release", replica_id="s0"), "") is None
 
 
 class TestInflightDecoder:
     def test_on_acquire_emits_inflight_plus_dispatched_delta(self):
-        upd = InflightDecoder().decode(StatisticEvent("on_acquire", request_id="r1", replica_id="s0"), "")
+        upd = InflightDecoder().decode(StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=42), "")
         assert isinstance(upd, MetricsUpdate)
         assert upd.node_id == "s0"
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: 1,
-            MetricKey.INFLIGHT_TOKENS: 0,  # no prompt forwarded → 0 token delta
+            MetricKey.INFLIGHT_TOKENS: 42,  # no prompt forwarded → 0 token delta
             MetricKey.DISPATCHED_COUNT: 1,
-            MetricKey.PROMPT_LEN_SUM: 0,  # no prompt forwarded → 0 length delta
+            MetricKey.PROMPT_LEN_SUM: 42,  # no prompt forwarded → 0 length delta
         }
         assert upd.is_delta is True
         assert upd.request_id == "r1"  # carried so the collector attributes the dispatch's turn
 
-    def test_on_acquire_forwards_prompt_len_delta(self):
-        upd = InflightDecoder().decode(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=42), ""
-        )
-        assert upd.metrics[MetricKey.PROMPT_LEN_SUM] == 42  # len(prompt_ids) at dispatch
-        assert upd.metrics[MetricKey.INFLIGHT_TOKENS] == 42  # gauge +prompt_len on acquire
-
     def test_on_release_emits_inflight_minus_completed_delta(self):
-        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0", prompt_len=42), "")
+        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0", prompt_len=42, request_id="r1"), "")
         assert isinstance(upd, MetricsUpdate)
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: -1,
@@ -114,31 +97,11 @@ class TestInflightDecoder:
             MetricKey.COMPLETED_COUNT: 1,
         }
         assert upd.is_delta is True
-        assert upd.request_id is None  # no request_id on the event → forwarded as None
-
-    def test_on_release_forwards_request_id_when_event_carries_it(self):
-        upd = InflightDecoder().decode(
-            StatisticEvent("on_release", replica_id="s0", prompt_len=42, request_id="r1"), ""
-        )
-        assert isinstance(upd, MetricsUpdate)
         assert upd.request_id == "r1"  # carried so the collector can attribute the release
 
-    def test_on_release_without_prompt_len_leaves_token_gauge_unchanged(self):
-        # Callers that don't track prompt_len release with the default 0, so the
-        # token gauge simply isn't decremented (no spurious negative drift).
-        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0"), "")
-        assert upd.metrics[MetricKey.INFLIGHT_TOKENS] == 0
-
-    def test_on_servers_removed_is_noop(self):
-        # Faithful to verl: removal must NOT zero the counter — release
-        # symmetry maintains it (zeroing would let a later release drive it
-        # negative). Cumulative counts are lifetime totals — also left intact.
-        assert InflightDecoder().decode(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
-
-    def test_non_event_payload_returns_none(self):
+    def test_returns_none(self):
         assert InflightDecoder().decode(b"bytes", "") is None
-
-    def test_missing_replica_returns_none(self):
+        assert InflightDecoder().decode(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
         assert InflightDecoder().decode(StatisticEvent("on_acquire"), "") is None
 
 
@@ -247,7 +210,15 @@ class TestCollectorCallbackIntegration:
         finally:
             collector.stop()
 
-    def test_inflight_collector_applies_acquire_release_delta(self):
+    def test_inflight_collector_applies_acquire_release_delta_and_prompt_len(self):
+        """Feature: InflightDecoder on_acquire/on_release drive inflight/token/dispatched/completed
+          deltas and accumulate PROMPT_LEN_SUM from the prompt_ids length.
+        Description: two acquires (r1 len-3, r2 len-10) to s0, one release (-3 tokens), and an
+          acquire to s1 with no prompt — exercising both the delta metrics and prompt-len sum.
+        Expectation:
+          s0 INFLIGHT_COUNT=1, INFLIGHT_TOKENS=10 (3+10-3), DISPATCHED_COUNT=2, COMPLETED_COUNT=1
+          s0 PROMPT_LEN_SUM=13 (3+10); s1 PROMPT_LEN_SUM=0 (None prompt → 0)
+        """
         from uni_agent.llm_router.collectors.collector import Collector
         from uni_agent.llm_router.store.data_store import DataStore
 
@@ -255,32 +226,19 @@ class TestCollectorCallbackIntegration:
         collector = Collector(CallbackTransport(balancer), InflightDecoder())
         collector.start()
         try:
-            balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # +1 inflight, +3 tokens
-            balancer.callbacks["on_acquire"][0]("r2", "s0", list(range(10)))  # +1 inflight, +10 tokens
+            balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # +1 inflight, +3 tokens, len 3
+            balancer.callbacks["on_acquire"][0]("r2", "s0", list(range(10)))  # +1 inflight, +10 tokens, len 10
             balancer.callbacks["on_release"][0]("s0", 3)  # -1 inflight, -3 tokens, +1 completed
-            assert DataStore().get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1
-            assert DataStore().get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 10  # 3 + 10 - 3
-            assert DataStore().get_metric("s0", MetricKey.DISPATCHED_COUNT) == 2
-            assert DataStore().get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
-        finally:
-            collector.stop()
-
-    def test_inflight_collector_accumulates_prompt_len_sum(self):
-        from uni_agent.llm_router.collectors.collector import Collector
-        from uni_agent.llm_router.store.data_store import DataStore
-
-        balancer = _FakeBalancer()
-        collector = Collector(CallbackTransport(balancer), InflightDecoder())
-        collector.start()
-        try:
-            # on_acquire(request_id, chosen, prompt_ids) — the third arg is the
-            # prompt token-id list; its length is attributed to PROMPT_LEN_SUM.
-            balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # len 3
-            balancer.callbacks["on_acquire"][0]("r2", "s0", list(range(10)))  # len 10
-            balancer.callbacks["on_acquire"][0]("r3", "s1", None)  # no prompt → 0
+            balancer.callbacks["on_acquire"][0]("r3", "s1", None)  # no prompt → PROMPT_LEN_SUM 0
             ds = DataStore()
-            assert ds.get_metric("s0", MetricKey.PROMPT_LEN_SUM) == 13  # 3 + 10
-            assert ds.get_metric("s1", MetricKey.PROMPT_LEN_SUM) == 0  # no prompt forwarded
+            # acquire/release delta metrics on s0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 10  # 3 + 10 - 3
+            assert ds.get_metric("s0", MetricKey.DISPATCHED_COUNT) == 2
+            assert ds.get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
+            # prompt-len sum: s0 accumulates 3+10; s1 gets 0 (None prompt not forwarded)
+            assert ds.get_metric("s0", MetricKey.PROMPT_LEN_SUM) == 13
+            assert ds.get_metric("s1", MetricKey.PROMPT_LEN_SUM) == 0
         finally:
             collector.stop()
 

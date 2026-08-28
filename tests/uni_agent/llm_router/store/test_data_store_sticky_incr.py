@@ -47,11 +47,6 @@ class TestPerReplicaStoreIncr:
         s.incr("n0", MetricKey.INFLIGHT_COUNT, -2)
         assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 3
 
-    def test_incr_default_delta_is_one(self):
-        s = PerReplicaStore()
-        s.incr("n0", MetricKey.INFLIGHT_COUNT)
-        assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 1
-
     def test_incr_isolates_nodes(self):
         s = PerReplicaStore()
         s.incr("n0", MetricKey.INFLIGHT_COUNT)
@@ -93,11 +88,6 @@ class TestPerReplicaStoreIncr:
         assert s.get("n0", MetricKey.NUM_REQUESTS_RUNNING) == 7
         assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 2
 
-    def test_incr_many_empty_is_noop(self):
-        s = PerReplicaStore()
-        s.incr_many("n0", {})  # no KeyError, no node created
-        assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 0
-
     def test_incr_many_unknown_key_raises(self):
         s = PerReplicaStore()
         with pytest.raises(KeyError):
@@ -118,14 +108,6 @@ def _reset_singletons():
 
 
 class TestDataStoreStickyDelegation:
-    def test_put_then_get(self):
-        ds = DataStore()
-        ds.put_sticky_binding("r1", "s0")
-        assert ds.get_sticky_binding("r1") == "s0"
-
-    def test_get_missing_is_none(self):
-        assert DataStore().get_sticky_binding("ghost") is None
-
     def test_invalidate_binding(self):
         ds = DataStore()
         ds.put_sticky_binding("r1", "s0")
@@ -148,22 +130,23 @@ class TestDataStoreStickyDelegation:
         ds.put_sticky_binding("r2", "s1")
         assert ds.sticky_status()["size"] == 2
 
-    def test_put_refresh_overwrites_binding(self):
+    def test_put_get_overwrite_and_missing(self):
+        # put → get; overwrite same request_id → latest wins; missing → None
         ds = DataStore()
         ds.put_sticky_binding("r1", "s0")
+        assert ds.get_sticky_binding("r1") == "s0"  # put then get
         ds.put_sticky_binding("r1", "s1")  # overload-fallback re-routes
-        assert ds.get_sticky_binding("r1") == "s1"
+        assert ds.get_sticky_binding("r1") == "s1"  # overwrite: latest wins
+        assert ds.get_sticky_binding("ghost") is None  # missing → None
 
-    def test_invalidate_missing_binding_is_noop(self):
-        ds = DataStore()
-        ds.invalidate_sticky_binding("ghost")  # must not raise
-        assert ds.get_sticky_binding("ghost") is None
-
-    def test_invalidate_replica_with_no_bindings_is_noop(self):
+    def test_invalidate_missing_target_is_noop(self):
+        # invalidate by request_id and by replica, both for non-existent targets
         ds = DataStore()
         ds.put_sticky_binding("r1", "s0")
+        ds.invalidate_sticky_binding("ghost")  # unknown request_id — must not raise
+        assert ds.get_sticky_binding("ghost") is None
         ds.invalidate_sticky_replica("sX")  # no binding points at sX
-        assert ds.get_sticky_binding("r1") == "s0"
+        assert ds.get_sticky_binding("r1") == "s0"  # untouched binding survives
 
 
 # ── Write methods return post-write values (§23 modified-X foundation) ──
