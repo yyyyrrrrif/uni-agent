@@ -36,7 +36,7 @@ from uni_agent.llm_router.collectors.transport.callback import (
 )
 from uni_agent.llm_router.types import MetricKey
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 
 class TestStatisticEvent:
@@ -76,7 +76,9 @@ class TestStickyDecoder:
 
 class TestInflightDecoder:
     def test_on_acquire_emits_inflight_plus_dispatched_delta(self):
-        upd = InflightDecoder().decode(StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=42), "")
+        upd = InflightDecoder().decode(
+            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=42), ""
+        )
         assert isinstance(upd, MetricsUpdate)
         assert upd.node_id == "s0"
         assert upd.metrics == {
@@ -89,7 +91,9 @@ class TestInflightDecoder:
         assert upd.request_id == "r1"  # carried so the collector attributes the dispatch's turn
 
     def test_on_release_emits_inflight_minus_completed_delta(self):
-        upd = InflightDecoder().decode(StatisticEvent("on_release", replica_id="s0", prompt_len=42, request_id="r1"), "")
+        upd = InflightDecoder().decode(
+            StatisticEvent("on_release", replica_id="s0", prompt_len=42, request_id="r1"), ""
+        )
         assert isinstance(upd, MetricsUpdate)
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: -1,

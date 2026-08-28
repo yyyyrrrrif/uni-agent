@@ -90,6 +90,7 @@ def _make_provider(node_id: str) -> CollectorManager:
 
 @pytest.mark.st
 @pytest.mark.gpu
+@pytest.mark.level1
 class TestGpuPrefixHitRateWithRealService:
     """Integration tests: DataStore.get_layer_prefix_hit_rate against a live vLLM ZMQ publisher."""
 

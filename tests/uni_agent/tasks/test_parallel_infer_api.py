@@ -5,6 +5,8 @@ import pytest
 from examples.inference import parallel_infer_api
 from examples.inference.parallel_infer_api import _allocate_worker_concurrency
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 @pytest.mark.cpu
 @pytest.mark.level0

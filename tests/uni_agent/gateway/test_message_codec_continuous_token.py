@@ -5,6 +5,7 @@ import torch
 
 from uni_agent.gateway.session.codec import MessageCodec
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 TOOLS = [
     {
         "type": "function",

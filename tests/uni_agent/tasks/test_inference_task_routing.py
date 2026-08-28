@@ -4,6 +4,8 @@ import pytest
 
 from uni_agent.tasks import TaskConfigResolver
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 @pytest.mark.cpu
 @pytest.mark.level0

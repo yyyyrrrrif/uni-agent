@@ -31,7 +31,7 @@ import subprocess
 
 import pytest
 
-pytestmark = [pytest.mark.e2e, pytest.mark.gpu]
+pytestmark = [pytest.mark.st, pytest.mark.gpu, pytest.mark.level1]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", "..", ".."))

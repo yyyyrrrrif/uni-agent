@@ -13,6 +13,8 @@ from uni_agent.agents.claude_code.agent import (
 )
 from uni_agent.sandbox.base import ExecResult
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 class _FakeSandbox:
     def __init__(

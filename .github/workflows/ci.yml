@@ -48,7 +48,7 @@ jobs:
           cd SWE-bench
           pip install -e .
 
-      # 4. Test with pytest
+      # 4. Test with pytest (gate: level0 + cpu only — fast smoke tests, no GPU)
       - name: Test with pytest
         run: |
           pip install pytest pytest-cov

@@ -2,6 +2,8 @@ import pytest
 
 from uni_agent.agents.base import ModelConfig
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 @pytest.mark.cpu
 @pytest.mark.level0

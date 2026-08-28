@@ -38,7 +38,7 @@ from uni_agent.llm_router.types.emit_spec import (
     EmitKey,
 )
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 
 class FakeRLInsight:

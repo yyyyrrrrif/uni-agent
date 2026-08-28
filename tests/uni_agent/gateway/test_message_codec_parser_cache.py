@@ -6,6 +6,7 @@ import pytest
 
 from tests.uni_agent.support import FakeTokenizer
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 TOOLS = [
     {
         "type": "function",

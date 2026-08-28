@@ -26,14 +26,12 @@ from __future__ import annotations
 
 import pytest
 import ray
-from verl.workers.rollout.router import get_router_handle
 
+from verl.workers.rollout.router import get_router_handle
 
 ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
 
-pytestmark = [pytest.mark.st, pytest.mark.cpu]
-
-
+pytestmark = [pytest.mark.st, pytest.mark.cpu, pytest.mark.level0]
 
 
 @ray.remote

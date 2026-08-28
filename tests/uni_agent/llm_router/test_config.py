@@ -49,26 +49,31 @@ _CN = ["vllm_zmq"]
 # -- ① Input/output normal cases --
 
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 
 class TestStrategyNormalInput:
     """Normal construction: field assignment, defaults, collector binding."""
 
-    @pytest.mark.parametrize("kwargs,attr,expected", [
-        # weight explicit value
-        ({"weight": 1.0, "collector_names": _CN}, "weight", 1.0),
-        # alpha default when omitted
-        ({"weight": 1.0, "collector_names": _CN}, "alpha", 0.7),
-        # load_threshold explicit value
-        ({"weight": 1.0, "load_threshold": 0.5, "collector_names": _CN}, "load_threshold", 0.5),
-        # layer_weights three-tier dict
-        ({"weight": 1.0, "layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}, "collector_names": _CN},
-         "layer_weights", {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}),
-        # memory_overload_filter explicit False
-        ({"weight": 1.0, "memory_overload_filter": False, "collector_names": _CN},
-         "memory_overload_filter", False),
-    ])
+    @pytest.mark.parametrize(
+        "kwargs,attr,expected",
+        [
+            # weight explicit value
+            ({"weight": 1.0, "collector_names": _CN}, "weight", 1.0),
+            # alpha default when omitted
+            ({"weight": 1.0, "collector_names": _CN}, "alpha", 0.7),
+            # load_threshold explicit value
+            ({"weight": 1.0, "load_threshold": 0.5, "collector_names": _CN}, "load_threshold", 0.5),
+            # layer_weights three-tier dict
+            (
+                {"weight": 1.0, "layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1}, "collector_names": _CN},
+                "layer_weights",
+                {"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
+            ),
+            # memory_overload_filter explicit False
+            ({"weight": 1.0, "memory_overload_filter": False, "collector_names": _CN}, "memory_overload_filter", False),
+        ],
+    )
     def test_normal_fields_parse(self, kwargs, attr, expected):
         """
         Feature: strategy fields assign explicit values and fall back to defaults
@@ -147,12 +152,15 @@ class TestStrategyAbnormalInput:
         with pytest.raises(ConfigError, match="load_threshold"):
             KVCAwareStrategyConfig(weight=1.0, load_threshold=load_threshold, collector_names=_CN)
 
-    @pytest.mark.parametrize("layer_weights", [
-        {"gpu": 0.7, "cpu": 0.2, "disk": 0.1},   # illegal key
-        {"gpu": 0.7, "cpu": 0.3},                 # missing tier
-        {"gpu": 0.5, "cpu": 0.2, "ssd": 0.1},     # sum < 1
-        {"gpu": 0.7, "cpu": 0.2, "ssd": 0.2},     # sum > 1
-    ])
+    @pytest.mark.parametrize(
+        "layer_weights",
+        [
+            {"gpu": 0.7, "cpu": 0.2, "disk": 0.1},  # illegal key
+            {"gpu": 0.7, "cpu": 0.3},  # missing tier
+            {"gpu": 0.5, "cpu": 0.2, "ssd": 0.1},  # sum < 1
+            {"gpu": 0.7, "cpu": 0.2, "ssd": 0.2},  # sum > 1
+        ],
+    )
     def test_layer_weights_invalid_raises_config_error(self, layer_weights):
         """
         Feature: invalid layer_weights triggers validation error
@@ -180,10 +188,13 @@ class TestStrategyAbnormalInput:
         with pytest.raises(TypeError):
             KVCAwareStrategyConfig(weight=1.0)
 
-    @pytest.mark.parametrize("field,value", [
-        ("memory_overload_filter", "yes"),
-        ("slow_cut", "random"),
-    ])
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("memory_overload_filter", "yes"),
+            ("slow_cut", "random"),
+        ],
+    )
     def test_optional_field_wrong_type_or_value_raises_config_error(self, field, value):
         """
         Feature: optional field of wrong type or value triggers validation error
@@ -193,24 +204,27 @@ class TestStrategyAbnormalInput:
         with pytest.raises(ConfigError, match=field):
             KVCAwareStrategyConfig(weight=1.0, **{field: value}, collector_names=_CN)
 
-    @pytest.mark.parametrize("strategies", [
-        # weights not summing to 1
+    @pytest.mark.parametrize(
+        "strategies",
         [
-            {
-                "_target": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                "weight": 0.4,
-                "collector_names": ["vllm_zmq"],
-            },
-            {
-                "_target": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                "weight": 0.4,
-                "collector_names": ["mooncake_prometheus"],
-            },
+            # weights not summing to 1
+            [
+                {
+                    "_target": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                    "weight": 0.4,
+                    "collector_names": ["vllm_zmq"],
+                },
+                {
+                    "_target": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                    "weight": 0.4,
+                    "collector_names": ["mooncake_prometheus"],
+                },
+            ],
+            [],  # empty list
+            "kvc_aware",  # not a list
+            ["kvc_aware"],  # item not dict
         ],
-        [],                 # empty list
-        "kvc_aware",        # not a list
-        ["kvc_aware"],      # item not dict
-    ])
+    )
     def test_strategies_invalid_raises_config_error(self, strategies):
         """
         Feature: invalid strategies list triggers from_config validation error
@@ -275,25 +289,30 @@ class TestStrategyHydraAbnormal:
         with pytest.raises((InstantiationException, ImportError, ConfigError)):
             instantiate(entry)
 
-    @pytest.mark.parametrize("strategies,match", [
-        # missing _target_ on a strategy item
-        ({"strategies": [{"weight": 1.0}]}, "_target_"),
-        # _target_ pointing to a non-StrategyConfig subclass
-        (
-            {"strategies": [
+    @pytest.mark.parametrize(
+        "strategies,match",
+        [
+            # missing _target_ on a strategy item
+            ({"strategies": [{"weight": 1.0}]}, "_target_"),
+            # _target_ pointing to a non-StrategyConfig subclass
+            (
                 {
-                    "_target_": "uni_agent.llm_router.config.CacheStoreConfig",
-                    "kv_cache_store_type": "list",
-                    "ttl": 30,
+                    "strategies": [
+                        {
+                            "_target_": "uni_agent.llm_router.config.CacheStoreConfig",
+                            "kv_cache_store_type": "list",
+                            "ttl": 30,
+                        },
+                    ]
                 },
-            ]},
-            "StrategyConfig",
-        ),
-        # empty config — no strategies key at all
-        ({}, "strategies"),
-        # strategies explicitly null
-        ({"strategies": None}, "strategies"),
-    ])
+                "StrategyConfig",
+            ),
+            # empty config — no strategies key at all
+            ({}, "strategies"),
+            # strategies explicitly null
+            ({"strategies": None}, "strategies"),
+        ],
+    )
     def test_from_config_rejects_invalid_strategies(self, strategies, match):
         """
         Feature: from_config rejects invalid strategies configuration
@@ -315,26 +334,48 @@ class TestStrategyHydraAbnormal:
 class TestMetricsNormalInput:
     """CollectorConfig normal construction: defaults, custom values, dataclass shape."""
 
-    @pytest.mark.parametrize("kwargs,attr,expected", [
-        # http_polling default
-        ({}, "http_polling", {"polling_interval": 5.0, "http_timeout": 10.0}),
-        # http_polling custom
-        ({"http_polling": {"polling_interval": 3.0, "http_timeout": 15.0}},
-         "http_polling", {"polling_interval": 3.0, "http_timeout": 15.0}),
-        # long_connection default
-        ({}, "long_connection", {
-            "base_retry_delay": 1.0, "max_retry_delay": 30.0,
-            "max_retry_attempts": 5, "retry_backoff_factor": 2.0,
-        }),
-        # long_connection custom
-        ({"long_connection": {
-            "base_retry_delay": 2.0, "max_retry_delay": 60.0,
-            "max_retry_attempts": 10, "retry_backoff_factor": 3.0,
-        }}, "long_connection", {
-            "base_retry_delay": 2.0, "max_retry_delay": 60.0,
-            "max_retry_attempts": 10, "retry_backoff_factor": 3.0,
-        }),
-    ])
+    @pytest.mark.parametrize(
+        "kwargs,attr,expected",
+        [
+            # http_polling default
+            ({}, "http_polling", {"polling_interval": 5.0, "http_timeout": 10.0}),
+            # http_polling custom
+            (
+                {"http_polling": {"polling_interval": 3.0, "http_timeout": 15.0}},
+                "http_polling",
+                {"polling_interval": 3.0, "http_timeout": 15.0},
+            ),
+            # long_connection default
+            (
+                {},
+                "long_connection",
+                {
+                    "base_retry_delay": 1.0,
+                    "max_retry_delay": 30.0,
+                    "max_retry_attempts": 5,
+                    "retry_backoff_factor": 2.0,
+                },
+            ),
+            # long_connection custom
+            (
+                {
+                    "long_connection": {
+                        "base_retry_delay": 2.0,
+                        "max_retry_delay": 60.0,
+                        "max_retry_attempts": 10,
+                        "retry_backoff_factor": 3.0,
+                    }
+                },
+                "long_connection",
+                {
+                    "base_retry_delay": 2.0,
+                    "max_retry_delay": 60.0,
+                    "max_retry_attempts": 10,
+                    "retry_backoff_factor": 3.0,
+                },
+            ),
+        ],
+    )
     def test_fields_parse_default_and_custom(self, kwargs, attr, expected):
         """
         Feature: CollectorConfig fields accept custom values and fall back to defaults
@@ -362,11 +403,14 @@ class TestMetricsNormalInput:
 class TestMetricsAbnormalInput:
     """CollectorConfig abnormal: per-field validation errors."""
 
-    @pytest.mark.parametrize("http_polling,match", [
-        ({"polling_interval": 0, "http_timeout": 10}, "polling_interval"),
-        ({"polling_interval": -1, "http_timeout": 10}, "polling_interval"),
-        ({"polling_interval": 5, "http_timeout": 0}, "http_timeout"),
-    ])
+    @pytest.mark.parametrize(
+        "http_polling,match",
+        [
+            ({"polling_interval": 0, "http_timeout": 10}, "polling_interval"),
+            ({"polling_interval": -1, "http_timeout": 10}, "polling_interval"),
+            ({"polling_interval": 5, "http_timeout": 0}, "http_timeout"),
+        ],
+    )
     def test_http_polling_invalid_raises_config_error(self, http_polling, match):
         """
         Feature: invalid http_polling values trigger validation error
@@ -376,12 +420,15 @@ class TestMetricsAbnormalInput:
         with pytest.raises(ConfigError, match=match):
             CollectorConfig(http_polling=http_polling)
 
-    @pytest.mark.parametrize("long_connection,match", [
-        ({"base_retry_delay": -1}, "base_retry_delay"),
-        ({"base_retry_delay": 5, "max_retry_delay": 3}, "max_retry_delay"),
-        ({"max_retry_attempts": 0}, "max_retry_attempts"),
-        ({"retry_backoff_factor": -1}, "retry_backoff_factor"),
-    ])
+    @pytest.mark.parametrize(
+        "long_connection,match",
+        [
+            ({"base_retry_delay": -1}, "base_retry_delay"),
+            ({"base_retry_delay": 5, "max_retry_delay": 3}, "max_retry_delay"),
+            ({"max_retry_attempts": 0}, "max_retry_attempts"),
+            ({"retry_backoff_factor": -1}, "retry_backoff_factor"),
+        ],
+    )
     def test_long_connection_invalid_raises_config_error(self, long_connection, match):
         """
         Feature: invalid long_connection values trigger validation error
@@ -402,11 +449,13 @@ class TestMetricsAbnormalInput:
 class TestMetricsOther:
     """from_config: collector defaults and overrides."""
 
-    _STRATEGY = [{
-        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-        "weight": 1.0,
-        "collector_names": ["vllm_zmq"],
-    }]
+    _STRATEGY = [
+        {
+            "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+            "weight": 1.0,
+            "collector_names": ["vllm_zmq"],
+        }
+    ]
 
     @pytest.mark.parametrize("collector", [None, {"http_polling": {"polling_interval": 3}}])
     def test_collector_defaults_or_override(self, collector):
@@ -434,13 +483,16 @@ class TestMetricsOther:
 class TestCacheStoreNormalInput:
     """CacheStoreConfig normal construction: store type and ttl defaults."""
 
-    @pytest.mark.parametrize("kwargs,attr,expected", [
-        ({"kv_cache_store_type": "list"}, "kv_cache_store_type", "list"),
-        ({"kv_cache_store_type": "radix_tree"}, "kv_cache_store_type", "radix_tree"),
-        ({}, "kv_cache_store_type", "list"),          # default store type
-        ({"ttl": 30.0}, "ttl", 30.0),
-        ({}, "ttl", 30.0),                            # default ttl
-    ])
+    @pytest.mark.parametrize(
+        "kwargs,attr,expected",
+        [
+            ({"kv_cache_store_type": "list"}, "kv_cache_store_type", "list"),
+            ({"kv_cache_store_type": "radix_tree"}, "kv_cache_store_type", "radix_tree"),
+            ({}, "kv_cache_store_type", "list"),  # default store type
+            ({"ttl": 30.0}, "ttl", 30.0),
+            ({}, "ttl", 30.0),  # default ttl
+        ],
+    )
     def test_fields_parse_default_and_custom(self, kwargs, attr, expected):
         """
         Feature: CacheStoreConfig fields accept custom values and fall back to defaults
@@ -457,11 +509,14 @@ class TestCacheStoreNormalInput:
 class TestCacheStoreAbnormalInput:
     """CacheStoreConfig abnormal: per-field validation errors."""
 
-    @pytest.mark.parametrize("kwargs,match", [
-        ({"kv_cache_store_type": "unknown"}, "kv_cache_store_type"),
-        ({"ttl": 0}, "ttl"),
-        ({"ttl": -1}, "ttl"),
-    ])
+    @pytest.mark.parametrize(
+        "kwargs,match",
+        [
+            ({"kv_cache_store_type": "unknown"}, "kv_cache_store_type"),
+            ({"ttl": 0}, "ttl"),
+            ({"ttl": -1}, "ttl"),
+        ],
+    )
     def test_field_invalid_raises_config_error(self, kwargs, match):
         """
         Feature: invalid kv_cache_store_type or ttl triggers validation error
@@ -477,13 +532,18 @@ class TestCacheStoreAbnormalInput:
         Description: from_config with cache_store="list"
         Expectation: raises ConfigError matching "cache_store"
         """
-        kwargs = OmegaConf.create({
-            "strategies": [{
-                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                "weight": 1.0, "collector_names": ["vllm_zmq"],
-            }],
-            "cache_store": "list",
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    }
+                ],
+                "cache_store": "list",
+            }
+        )
         with pytest.raises(ConfigError, match="cache_store"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -494,11 +554,13 @@ class TestCacheStoreAbnormalInput:
 class TestCacheStoreOther:
     """from_config: cache_store defaults when omitted or null."""
 
-    _STRATEGY = [{
-        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-        "weight": 1.0,
-        "collector_names": ["vllm_zmq"],
-    }]
+    _STRATEGY = [
+        {
+            "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+            "weight": 1.0,
+            "collector_names": ["vllm_zmq"],
+        }
+    ]
 
     def test_cache_store_defaults_when_omitted_or_null(self):
         """
@@ -506,8 +568,7 @@ class TestCacheStoreOther:
         Description: from_config with cache_store omitted or explicitly None
         Expectation: result.cache_store is a CacheStoreConfig with default type/ttl
         """
-        for cfg in ({"strategies": self._STRATEGY},
-                    {"strategies": self._STRATEGY, "cache_store": None}):
+        for cfg in ({"strategies": self._STRATEGY}, {"strategies": self._STRATEGY, "cache_store": None}):
             result = KVCAwareConfig.from_config(OmegaConf.create(cfg))
             assert isinstance(result.cache_store, CacheStoreConfig)
             assert result.cache_store.kv_cache_store_type == "list"
@@ -573,13 +634,18 @@ class TestKVCAwareAbnormalInput:
         Description: from_config with collector="vllm"
         Expectation: raises ConfigError matching "collector"
         """
-        kwargs = OmegaConf.create({
-            "strategies": [{
-                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                "weight": 1.0, "collector_names": ["vllm_zmq"],
-            }],
-            "collector": "vllm",
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    }
+                ],
+                "collector": "vllm",
+            }
+        )
         with pytest.raises(ConfigError, match="collector"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -591,13 +657,18 @@ class TestKVCAwareAbnormalInput:
         """
         from omegaconf.errors import OmegaConfBaseException
 
-        kwargs = OmegaConf.create({
-            "strategies": [{
-                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                "weight": 1.0, "collector_names": ["vllm_zmq"],
-            }],
-            "collector": {"unknown_key": 123, "http_polling": {"polling_interval": 5}},
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    }
+                ],
+                "collector": {"unknown_key": 123, "http_polling": {"polling_interval": 5}},
+            }
+        )
         with pytest.raises(OmegaConfBaseException, match="unknown_key"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -607,11 +678,13 @@ class TestKVCAwareAbnormalInput:
         Description: from_config with empty strategies and invalid collector/cache_store
         Expectation: raises ConfigError whose message contains a relevant field name
         """
-        kwargs = OmegaConf.create({
-            "strategies": [],
-            "collector": {"http_polling": {"polling_interval": -1}},
-            "cache_store": {"ttl": 0},
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [],
+                "collector": {"http_polling": {"polling_interval": -1}},
+                "cache_store": {"ttl": 0},
+            }
+        )
         with pytest.raises(ConfigError) as exc_info:
             KVCAwareConfig.from_config(kwargs)
         error_msg = str(exc_info.value)
@@ -738,7 +811,6 @@ class TestKVCAwareHydraAbnormal:
 
 
 # -- ⑤ Other cases --
-
 
 
 def _load_pkg_router_yaml() -> dict:

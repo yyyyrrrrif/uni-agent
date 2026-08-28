@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 class _UnstableGenerationPromptTokenizer:
     def apply_chat_template(self, messages, *, add_generation_prompt, tokenize=True, **kwargs):

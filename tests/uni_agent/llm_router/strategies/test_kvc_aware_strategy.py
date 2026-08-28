@@ -42,7 +42,7 @@ from uni_agent.llm_router.strategies.kvc_aware import (
 from uni_agent.llm_router.strategies.routing import RoutingStrategy
 from uni_agent.llm_router.types import Layer, MetricKey, SlowCut
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -323,8 +323,8 @@ class TestKVCAwareTierWeights:
         scores = strat.score(PROMPT_IDS, provider, _replicas("cpu_hit", "ssd_hit"))
         assert scores == pytest.approx([0.324, 0.296])
         # formula breakdown: score = α·s_cache + (1-α)·s_load; both share load=0.2→s_load=0.8
-        assert scores[0] == pytest.approx(0.7 * (0.2 * 0.6) + 0.3 * 0.8)   # cpu: w_cpu·cpu_hit
-        assert scores[1] == pytest.approx(0.7 * (0.1 * 0.8) + 0.3 * 0.8)   # ssd: w_ssd·ssd_hit
+        assert scores[0] == pytest.approx(0.7 * (0.2 * 0.6) + 0.3 * 0.8)  # cpu: w_cpu·cpu_hit
+        assert scores[1] == pytest.approx(0.7 * (0.1 * 0.8) + 0.3 * 0.8)  # ssd: w_ssd·ssd_hit
         assert scores[0] > scores[1]
 
 
@@ -599,18 +599,21 @@ class TestStickyShortCircuit:
 # the formula-coverage assertions.
 # --------------------------------------------------------------------------- #
 class TestLoadFormula:
-    @pytest.mark.parametrize("load_weights,kv,running,waiting,inflight,expected", [
-        # baseline: all-zero inputs → load=0
-        ((0.4, 0.2, 0.1, 0.3), 0.0, 0, 0, 0, 0.0),
-        # kv term (weight a)
-        ((1.0, 0.0, 0.0, 0.0), 0.5, 0, 0, 0, 0.5),
-        # running term (weight b), clamped to 1.0 when running > mns
-        ((0.0, 1.0, 0.0, 0.0), 0.8, 128, 0, 0, 1.0),
-        # waiting term (weight c)
-        ((0.0, 0.0, 1.0, 0.0), 0.0, 0, 10, 0, 10 / 64),
-        # inflight term (weight d)
-        ((0.0, 0.0, 0.0, 1.0), 0.0, 0, 0, 32, 0.5),
-    ])
+    @pytest.mark.parametrize(
+        "load_weights,kv,running,waiting,inflight,expected",
+        [
+            # baseline: all-zero inputs → load=0
+            ((0.4, 0.2, 0.1, 0.3), 0.0, 0, 0, 0, 0.0),
+            # kv term (weight a)
+            ((1.0, 0.0, 0.0, 0.0), 0.5, 0, 0, 0, 0.5),
+            # running term (weight b), clamped to 1.0 when running > mns
+            ((0.0, 1.0, 0.0, 0.0), 0.8, 128, 0, 0, 1.0),
+            # waiting term (weight c)
+            ((0.0, 0.0, 1.0, 0.0), 0.0, 0, 10, 0, 10 / 64),
+            # inflight term (weight d)
+            ((0.0, 0.0, 0.0, 1.0), 0.0, 0, 0, 32, 0.5),
+        ],
+    )
     def test_compute_load_terms(self, load_weights, kv, running, waiting, inflight, expected):
         """
         Feature: load = a·kv + b·min(1,running/mns) + c·min(1,waiting/mns) + d·min(1,inflight/mns)

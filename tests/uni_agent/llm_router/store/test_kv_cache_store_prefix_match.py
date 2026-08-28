@@ -22,7 +22,7 @@ from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 from uni_agent.llm_router.types import Layer
 from uni_agent.llm_router.utils.hash import get_prefix_hashes_incremental
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 BLOCK_SIZE = 2
 SEED = 0

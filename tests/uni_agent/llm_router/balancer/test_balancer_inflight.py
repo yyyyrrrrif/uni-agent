@@ -34,7 +34,7 @@ from uni_agent.llm_router.types import MetricKey
 
 from ._helpers import _make_balancer
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 
 class TestInflightEndToEnd:

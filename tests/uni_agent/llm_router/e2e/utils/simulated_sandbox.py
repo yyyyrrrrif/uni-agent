@@ -156,7 +156,10 @@ class _SimulatedSession:
         self._sampler = sampler
         self._max_turns = max_turns
         self._messages: list[dict[str, Any]] = [
-            {"role": "system", "content": "You are a helpful coding agent. Use the tools to fix the issue, then submit."},
+            {
+                "role": "system",
+                "content": "You are a helpful coding agent. Use the tools to fix the issue, then submit.",
+            },
             {"role": "user", "content": task or "Resolve the task."},
         ]
 
@@ -192,9 +195,7 @@ class _SimulatedSession:
                     else:
                         route = self._sampler.route(str(arguments.get("command", "")))
                         observation = self._sampler.render(route)
-                    self._messages.append(
-                        {"role": "tool", "tool_call_id": call["id"], "content": observation}
-                    )
+                    self._messages.append({"role": "tool", "tool_call_id": call["id"], "content": observation})
                 if finished:
                     break
         return turns

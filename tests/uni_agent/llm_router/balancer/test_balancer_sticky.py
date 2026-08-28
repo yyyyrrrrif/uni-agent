@@ -34,7 +34,7 @@ from ._helpers import (
     _router_config,
 )
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:

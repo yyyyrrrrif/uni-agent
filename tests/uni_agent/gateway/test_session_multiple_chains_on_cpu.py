@@ -14,6 +14,7 @@ from uni_agent.gateway.adapters.openai import openai_to_internal
 from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle
 from verl.workers.rollout.replica import TokenOutput
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 HELPFUL_SYS = {"role": "system", "content": "You are helpful."}
 SUBAGENT_SYS = {"role": "system", "content": "You are a focused subagent."}
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})

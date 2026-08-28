@@ -22,7 +22,7 @@ import pytest
 from uni_agent.llm_router.collectors.decoder.vllm.kv import VLLMKVDecoder
 from uni_agent.llm_router.types import Layer
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
 
 
 def _stored_event(block_hash, parent, token_ids, block_size, medium):

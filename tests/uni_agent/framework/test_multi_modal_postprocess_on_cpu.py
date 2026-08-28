@@ -5,6 +5,8 @@ import torch
 
 from tests.uni_agent.support import FakeProcessor
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 @pytest.mark.cpu
 @pytest.mark.level0

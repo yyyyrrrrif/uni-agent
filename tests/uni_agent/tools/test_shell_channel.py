@@ -5,6 +5,8 @@ import pytest
 from uni_agent.sandbox import ExecResult
 from uni_agent.tools.shell import TmuxShell
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 class RecordingBackend:
     def __init__(self) -> None:

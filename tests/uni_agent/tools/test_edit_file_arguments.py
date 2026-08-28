@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from uni_agent.tools.edit_file import EditFileTool, StrReplaceEditorArguments
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 def _parse_view_range(value):
     return StrReplaceEditorArguments(

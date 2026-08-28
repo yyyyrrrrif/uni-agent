@@ -9,6 +9,8 @@ import ray
 
 from tests.uni_agent.support import FakeTokenizer, RecordingLLMClient, SequencedBackend
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
+
 
 @pytest.fixture(scope="session")
 def ray_runtime():

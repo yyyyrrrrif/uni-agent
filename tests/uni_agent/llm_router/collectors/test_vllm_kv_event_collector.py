@@ -45,6 +45,7 @@ def _make_collector():
 
 @pytest.mark.st
 @pytest.mark.gpu
+@pytest.mark.level1
 class TestVLLMKVEventCollectorWithRealService:
     """Integration tests: vLLM ZMQ KV-cache collector against a live vLLM ZMQ publisher."""
 

@@ -50,6 +50,7 @@ def _make_collector():
 
 @pytest.mark.st
 @pytest.mark.gpu
+@pytest.mark.level1
 class TestVLLMMetricsCollectorWithRealService:
     """Integration tests: vLLM HTTP metrics collector against a live vLLM server."""
 

@@ -14,6 +14,7 @@ from uni_agent.framework.framework import GatewayAgentFramework, _align_routed_e
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
 
+pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 _RUNNER_CALLS = []
 _TEST_INLINE_RUNNERS = {}
 _POSTPROCESSOR_CALLS = []
