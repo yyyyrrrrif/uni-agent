@@ -109,7 +109,7 @@ step1_ssh_check() {
 # =====================================================================
 # Cleanup order: kill driver -> ray stop -> kill stray ray:: -> fuser (davinci + :9092).
 KILL_DRIVER_CMD="ps aux | grep -E 'run_infer[.]sh|run_infer[.]py' | grep -v grep | awk '{print \$2}' | xargs -r kill -9 2>/dev/null || true"
-KILL_RAY_CMD="ps aux | grep -E 'ray[:][:]' | grep -v grep | awk '{print \$2}' | xargs -r kill -9 2>/dev/null || true"
+KILL_RAY_CMD="ps aux | grep -E 'ray[:][:]|raylet|gcs_server' | grep -v grep | awk '{print \$2}' | xargs -r kill -9 2>/dev/null || true"
 FUSER_CMD="bash -lc 'fuser -k /dev/davinci* 2>/dev/null || true; fuser -k 9092/tcp 2>/dev/null || true'"
 NODE_CLEANUP="${KILL_DRIVER_CMD}; ray stop -f 2>/dev/null || true; ${KILL_RAY_CMD}; ${FUSER_CMD}"
 
@@ -170,9 +170,29 @@ step2_rl_insight() {
 # =====================================================================
 # Step 3: ascend-exps matrix (each run_infer spans all 6 nodes)
 # =====================================================================
+
+archive_rl_insight() {
+    local exp_id=${1:-}
+    if [ -z "${exp_id}" ]; then
+        log " (skip rl-insight archive: EXP_ID empty)"
+        return 0
+    fi
+    local dest="${ARCHIVE_ROOT}/${exp_id}"
+    mkdir -p "${dest}"
+    local tgz="{dest}/rl-insight-data.tgz"
+    log " archiving rl-insight data -> ${tgz}"
+    if [ -d /root/.rl-insight/data ]; then
+        ( cd /root/.rl-insight/ && tar czf "${tgz}" data ) 2>/dev/null \
+            && log " rl-insight archived ($(du -h "${tgz}" 2>/dev/null | cut -f1))" \
+            || log " WARNING: rl-insight archive failed"
+    fi
+}
+
 run_experiment() {
     local log_file=$1
     shift
+
+    local log_mtime_before=$(stat -c %Y "${log_file}" 2>/dev/null || echo 0)
 
     while ! grep -q "${TARGET}" "${log_file}" 2>/dev/null; do
         set +e
@@ -199,6 +219,13 @@ run_experiment() {
             --kv-events \
             "$@" > "${log_file}" 2>&1 || log "  (run failed, will retry)"
     done
+    log "experiment resolved ${log_file}"
+    local log_mtime_after=$(stat -c %Y "$(log_file)" 2>/dev/null || echo 0)
+    if [ "${log_mtime_after}" != "${log_mtime_before}" ]; then
+        archive_rl_insight "${EXP_ID}"
+    else
+        log " (log unchanged - resolved from previous run, skip archive)"
+    fi
 }
 
 step3_matrix() {
@@ -210,16 +237,26 @@ step3_matrix() {
 
     for CONCURRENCY in "${concurrencys[@]}"; do
         for CONTEXT in "${contexts[@]}"; do
-            local LOG_FILE="infer-sticky-prompt${MAX_SAMPLES}x8-${CONCURRENCY}x${CONTEXT}-n${NNODES}.log"
-            log "sticky concurrency=${CONCURRENCY} context=${CONTEXT}"
+            local EXP_ID="infer-sticky-prompt${MAX_SAMPLES}x8-${CONCURRENCY}x${CONTEXT}-n${NNODES}"
+            local LOG_FILE="${EXP_ID}.log"
+            export SWE_AGENT_TRAJECTORY_DIR="${ARCHIVE_ROOT}/${EXP_ID}/trajectories"
+            export UNI_AGENT_GATEWAY_REJECTED_DIR="${ARCHIVE_ROOT}/${EXP_ID}/rejected_requests"
+            mkdir -p "${SWE_AGENT_TRAJECTORY_DIR}" "${UNI_AGENT_GATEWAY_REJECTED_DIR}"
+            export SWE_AGENT_DUMP_TRAJECTORIES="${EXP_ID}.traj"
+            log "sticky concurrency=${CONCURRENCY} context=${CONTEXT} (traj -> ${ARCHIVE_ROOT}/${EXP_ID}/trajectories)"
             run_experiment "${LOG_FILE}" \
                 --slow-cut least-inflight \
                 --overload-mode None
 
             local lts=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9)
             for lt in "${lts[@]}"; do
-                LOG_FILE="infer-kvcaware-lt${lt}-prompt${MAX_SAMPLES}x8-${CONCURRENCY}x${CONTEXT}-n${NNODES}.log"
-                log "kvcaware-lt${lt} concurrency=${CONCURRENCY} context=${CONTEXT}"
+                local EXP_ID="infer-kvcaware-lt${lt}-prompt${MAX_SAMPLES}x8-${CONCURRENCY}x${CONTEXT}-n${NNODES}"
+                local LOG_FILE="${EXP_ID}.log"
+                export SWE_AGENT_TRAJECTORY_DIR="${ARCHIVE_ROOT}/${EXP_ID}/trajectories"
+                export UNI_AGENT_GATEWAY_REJECTED_DIR="${ARCHIVE_ROOT}/${EXP_ID}/rejected_requests"
+                mkdir -p "${SWE_AGENT_TRAJECTORY_DIR}" "${UNI_AGENT_GATEWAY_REJECTED_DIR}"
+                export SWE_AGENT_DUMP_TRAJECTORIES="${EXP_ID}.traj"
+                log "kvcaware-lt${lt} concurrency=${CONCURRENCY} context=${CONTEXT} (traj -> ${ARCHIVE_ROOT}/${EXP_ID}/trajectories)"
                 run_experiment "${LOG_FILE}" \
                     --slow-cut capacity-token-aware \
                     --overload-mode kv_cache_usage_perc \
