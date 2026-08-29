@@ -21,14 +21,11 @@ from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 
 class KvEventsReplica(vLLMReplica):
-    """vLLMReplica whose per-node actors are KvEventsHttpServer instances.
-
-    Deliberately does NOT override ``_get_server_name_prefix``: verl's
-    ServerAdapter rebuilds the actor name from ``rollout.name`` and looks it
-    up via ``ray.get_actor`` (vllm_rollout.py ``_ensure_server_handle``), so
-    any prefix change breaks colocated weight sync.
-    """
+    """vLLMReplica whose per-node actors are KvEventsHttpServer instances."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.server_class = ray.remote(KvEventsHttpServer)
+
+    def _get_server_name_prefix(self) -> str:
+        return "uni_agent_"
