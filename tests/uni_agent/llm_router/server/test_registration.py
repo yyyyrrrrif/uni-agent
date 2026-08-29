@@ -12,7 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The vllm_kv_events rollout backend registers in verl's replica registry."""
+"""KvEvents mounting: the ``vllm`` backend is overridden, the name stays stock.
+
+Two invariants: (1) the dynamic ``RolloutReplicaRegistry`` maps ``vllm`` to
+KvEventsReplica after import, and (2) every *name-based* lookup that runs in
+other processes keeps resolving verl's own vLLM entries — the static
+``_ROLLOUT_REGISTRY`` used by ``CheckpointEngineWorker`` Ray actors (a new
+registered name would crash there: driver-side registrations can't reach actor
+processes), and ``ServerAdapter``'s actor-name lookup, which rebuilds the name
+from ``rollout.name`` (so the replica must NOT change the name prefix).
+"""
 
 import pytest
 
@@ -21,14 +30,32 @@ pytestmark = [pytest.mark.st, pytest.mark.cpu]
 vllm = pytest.importorskip("vllm")  # noqa: F841  (server import chain needs it)
 
 
-def test_registry_mount():
-    import uni_agent.llm_router.server  # noqa: F401  (import side-effect registers)
-    from uni_agent.llm_router.server import KV_EVENTS_ROLLOUT_NAME
+def test_import_overrides_vllm_replica():
+    import uni_agent.llm_router.server  # noqa: F401  (import side-effect overrides)
     from uni_agent.llm_router.server.replica import KvEventsReplica
     from verl.workers.rollout.replica import RolloutReplicaRegistry, get_rollout_replica_class
 
-    assert get_rollout_replica_class(KV_EVENTS_ROLLOUT_NAME) is KvEventsReplica
-    assert RolloutReplicaRegistry.get(KV_EVENTS_ROLLOUT_NAME) is KvEventsReplica
+    assert RolloutReplicaRegistry.get("vllm") is KvEventsReplica
+    assert get_rollout_replica_class("vllm") is KvEventsReplica
+
+
+def test_name_based_lookups_stay_stock_vllm():
+    import uni_agent.llm_router.server  # noqa: F401  (override active)
+    from verl.workers.rollout.base import get_rollout_class
+
+    # Static-table lookup (CheckpointEngineWorker actors): must resolve the
+    # stock ServerAdapter, not depend on any driver-side registration.
+    adapter = get_rollout_class("vllm", "async")
+    assert adapter.__module__.startswith("verl.workers.rollout.vllm_rollout")
+
+
+def test_replica_keeps_stock_actor_name_prefix():
+    from uni_agent.llm_router.server.replica import KvEventsReplica
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
+
+    # ServerAdapter rebuilds actor names from rollout.name ("vllm_"); a prefix
+    # override here would break its ray.get_actor lookup in colocated flows.
+    assert KvEventsReplica._get_server_name_prefix is vLLMReplica._get_server_name_prefix
 
 
 def test_http_server_surface():

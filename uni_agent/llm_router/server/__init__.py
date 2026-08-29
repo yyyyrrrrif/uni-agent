@@ -12,24 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""kv-events-aware vLLM rollout server, mounted via verl's replica registry.
+"""kv-events-aware vLLM rollout server for verl: overrides the ``vllm`` backend.
 
-Importing this module registers the ``vllm_kv_events`` rollout backend in
-verl's ``RolloutReplicaRegistry`` — the same registry-based extension point
-verl-omni uses, so no verl-side code is needed. Select it with
-``actor_rollout_ref.rollout.name: vllm_kv_events``; everything else
-(engine kwargs, ``router_config_path``) is standard verl config.
+Importing this module replaces verl's ``vllm`` entry in ``RolloutReplicaRegistry``
+with :class:`KvEventsReplica`, so every ``rollout.name: vllm`` server in the
+importing process becomes a :class:`KvEventsHttpServer`. That is a behavioral
+superset: with no ``kv-events-config`` in engine kwargs it behaves identically
+to stock vLLM, and when ``enable_kv_cache_events`` is set it additionally
+allocates per-replica port blocks (see ``http_server``) and exposes
+``get_kv_events_endpoints`` for the router (``get_rollout_config`` ships in
+verl itself).
 
-The backend is a drop-in superset of plain ``vllm``: with no
-``kv-events-config`` in engine kwargs it behaves identically, and when
-``enable_kv_cache_events`` is set it additionally allocates per-replica port
-blocks (see ``http_server``) and exposes ``get_kv_events_endpoints`` for the
-router (``get_rollout_config`` ships in verl itself).
+``rollout.name`` stays the stock ``"vllm"`` on purpose: verl also resolves the
+name through the static ``_ROLLOUT_REGISTRY`` inside ``CheckpointEngineWorker``
+Ray actors (driver-side registrations can't reach those processes) and through
+``ServerAdapter``'s actor-name lookup, both of which must keep hitting verl's
+own vLLM entries. A *new* registered name would crash the former
+("Rollout <name> with mode async not found").
 """
 
 from verl.workers.rollout.replica import RolloutReplicaRegistry
 
-KV_EVENTS_ROLLOUT_NAME = "vllm_kv_events"
+__all__ = ["KvEventsHttpServer", "KvEventsReplica"]
+
+# Lazy exports (PEP 562): these modules import vllm, while ``net_utils`` below
+# them stays importable (and testable) without it.
+_LAZY_EXPORTS = {
+    "KvEventsHttpServer": "uni_agent.llm_router.server.http_server",
+    "KvEventsReplica": "uni_agent.llm_router.server.replica",
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_EXPORTS:
+        import importlib
+
+        return getattr(importlib.import_module(_LAZY_EXPORTS[name]), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _load_kv_events_replica():
@@ -38,4 +57,4 @@ def _load_kv_events_replica():
     return KvEventsReplica
 
 
-RolloutReplicaRegistry.register(KV_EVENTS_ROLLOUT_NAME, _load_kv_events_replica)
+RolloutReplicaRegistry.register("vllm", _load_kv_events_replica)
