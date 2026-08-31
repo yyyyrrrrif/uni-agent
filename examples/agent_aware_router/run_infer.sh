@@ -21,4 +21,4 @@ export SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX:-mini-swe-}"
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
 export RL_INSIGHT_SERVER_URL="${RL_INSIGHT_SERVER_URL:-http://127.0.0.1:18080}"
 
-python examples/llm_router/run_infer.py "$@"
+python examples/agent_aware_router/run_infer.py "$@"

@@ -29,12 +29,8 @@ KV-cache-aware knobs:
                         (default pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml)
   --kv-events           vLLM kv-events zmq publisher; the kvcaware collector's load signal
                         (retained-cache occupancy).
-  --alpha / --load-threshold / --slow-cut / --overload-mode / --do-shortcut
-                        strategy[0] overrides; each falls back to the packaged YAML value.
+  --load-threshold      strategy[0] overrides; each falls back to the packaged YAML value.
   --max-num-seqs        engine max concurrent sequences.
-  --device              gpu/ascend (selects the mooncake connector class).
-  --enable-mooncake     attach MooncakeStoreConnector for cross-replica KV sharing.
-  --mooncake-config-path   mooncake config JSON (used with --enable-mooncake).
 
 Example (single node, 2-way tensor parallel, kvcaware router + kv-events)::
 
@@ -43,7 +39,7 @@ Example (single node, 2-way tensor parallel, kvcaware router + kv-events)::
         --model-path ~/models/Qwen/Qwen3-8B \
         --task-config examples/llm_router/task_config_mini_swe_agent.yaml \
         --tool-parser qwen3_coder --tensor-parallel-size 2 \
-        --max-model-len 40960 --kv-events --limit 1
+        --max-model-len 40960 --limit 1
 """
 
 import argparse
@@ -128,11 +124,7 @@ def _resolve_router_config_path(path: str) -> str:
 def _write_overridden_router_yaml(
     *,
     base_path: str,
-    alpha: float | None,
     load_threshold: float | None,
-    slow_cut: str | None,
-    overload_mode: str | None,
-    do_shortcut: bool | None,
 ) -> str:
     """Resolve the packaged router YAML, apply CLI overrides, write a temp copy.
 
@@ -168,16 +160,9 @@ def _write_overridden_router_yaml(
         strat0 = next(iter(strategies.values()))
     else:
         strat0 = strategies[0]
-    if alpha is not None:
-        strat0.alpha = alpha
+
     if load_threshold is not None:
         strat0.load_threshold = load_threshold
-    if slow_cut is not None:
-        strat0.slow_cut = slow_cut
-    if overload_mode is not None:
-        strat0.overload_mode = overload_mode
-    if do_shortcut is not None:
-        strat0.do_shortcut = do_shortcut
 
     # Save the COMPOSED tree (defaults expanded) so verl reads the temp file
     # with plain Hydra compose or OmegaConf.load alike.
@@ -246,15 +231,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # vLLM engine kwargs: MFU metric (always on) + optional mooncake connector / kv-events.
     vllm_kwargs: dict = {"enable_mfu_metrics": True}
-    if args.enable_mooncake:
-        # Cross-replica KV sharing via mooncake (config via MOONCAKE_CONFIG_PATH env).
-        # GPU build uses "MooncakeStoreConnector"; vllm-ascend uses "MooncakeConnectorStoreV1".
-        mooncake_connector = "MooncakeConnectorStoreV1" if args.device == "ascend" else "MooncakeStoreConnector"
-        vllm_kwargs["kv_transfer_config"] = {
-            "kv_connector": mooncake_connector,
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {},
-        }
+
     if args.kv_events:
         # vLLM kv-events (zmq publisher) — kvcaware load signal (retained-cache
         # occupancy). Ports are placeholders (the uni-agent kv-events server
@@ -272,11 +249,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     # YAML when omitted; lands on the temp copy verl loads via router_config_path.
     router_yaml = _write_overridden_router_yaml(
         base_path=args.router_config_path,
-        alpha=args.alpha,
         load_threshold=args.load_threshold,
-        slow_cut=args.slow_cut,
-        overload_mode=args.overload_mode,
-        do_shortcut=args.do_shortcut,
     )
     rollout.router_config_path = router_yaml
 
@@ -295,13 +268,6 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
             }
         },
     }
-    if args.simulated_runner_fqn:
-        # Swap the sandbox-backed runner for a test double (canned observations,
-        # no container): the framework treats runners as interchangeable
-        # AgentRunner-protocol callables.
-        task_runner = agent_framework_cfg["agent_runners"]["task"]
-        task_runner["runner_fqn"] = args.simulated_runner_fqn
-        task_runner["runner_kwargs"] = {}
     agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
@@ -454,11 +420,6 @@ def main() -> None:
         help="Local model checkpoint the engine loads.",
     )
     parser.add_argument(
-        "--served-model-name",
-        default=None,
-        help="Model name sent on chat-completions requests (default: basename of --model-path).",
-    )
-    parser.add_argument(
         "--task-config",
         required=True,
         help="Path to a YAML task config: one ``- name: ...`` entry or a list of them (required). "
@@ -540,12 +501,6 @@ def main() -> None:
         default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/uni_agent_logs"),
         help="Root directory for per-session logs and trajectories; use an empty value to disable.",
     )
-    parser.add_argument(
-        "--simulated-runner-fqn",
-        default=None,
-        help="Swap the sandbox-backed task runner for an AgentRunner-protocol test double "
-        "(e.g. the e2e simulated sandbox); no container is started.",
-    )
 
     # ---- KV-cache-aware router ----
     parser.add_argument(
@@ -562,72 +517,24 @@ def main() -> None:
         help="Maximum number of concurrent sequences per engine.",
     )
     parser.add_argument(
-        "--device",
-        type=str,
-        default="gpu",
-        choices=["gpu", "ascend"],
-        help="Target backend: 'gpu' or 'ascend' (selects the mooncake connector class).",
-    )
-    parser.add_argument(
-        "--enable-mooncake",
-        action="store_true",
-        help="Attach MooncakeStoreConnector for cross-replica KV sharing (a mooncake master must run separately).",
-    )
-    parser.add_argument(
-        "--mooncake-config-path",
-        type=str,
-        default="mooncake_config.json",
-        help="Path to the mooncake config JSON (used with --enable-mooncake).",
-    )
-    parser.add_argument(
         "--kv-events",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Enable vLLM kv-events zmq publisher for retained-cache occupancy collection. "
-        "Required for KVCAware router load signal and standalone collector metrics.",
+        "Required for KVCAware router load signal and standalone collector metrics. "
+        "Use --no-kv-events to disable.",
     )
 
     # KVCAware router strategy[0] overrides (each falls back to the packaged YAML when omitted).
     parser.add_argument(
-        "--alpha",
-        type=float,
-        default=None,
-        help="KVCAware strategy[0] alpha (cache vs load blend, [0,1]). Overrides the packaged YAML when set.",
-    )
-    parser.add_argument(
         "--load-threshold",
         type=float,
-        default=None,
+        default=0.9,
         help="KVCAware strategy[0] load_threshold (overload when load > threshold, (0,1)). "
         "Overrides the packaged YAML when set.",
     )
-    parser.add_argument(
-        "--slow-cut",
-        type=str,
-        choices=["locality-aware", "prefix-load-aware", "least-inflight", "capacity-token-aware"],
-        default=None,
-        help="KVCAware strategy[0] slow_cut fallback scoring mode. Overrides the packaged YAML when set.",
-    )
-    parser.add_argument(
-        "--overload-mode",
-        type=str,
-        choices=["None", "kv_cache_usage_perc", "kv_load"],
-        default=None,
-        help="KVCAware strategy[0] overload_mode for the sticky short-circuit. Overrides the packaged YAML when set.",
-    )
-    parser.add_argument(
-        "--do-shortcut",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="KVCAware strategy[0] do_shortcut master switch for the sticky short-circuit. "
-        "Use --do-shortcut to enable, --no-do-shortcut to disable. Overrides the packaged YAML when set.",
-    )
 
     args = parser.parse_args()
-
-    # Mooncake connector reads MOONCAKE_CONFIG_PATH (not extra_config). Set before
-    # ray.init so Ray-spawned workers inherit it.
-    if args.enable_mooncake and args.mooncake_config_path:
-        os.environ["MOONCAKE_CONFIG_PATH"] = os.path.expanduser(args.mooncake_config_path)
 
     if not ray.is_initialized():
         if os.environ.get("RAY_ADDRESS"):
@@ -638,7 +545,7 @@ def main() -> None:
             ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
 
     resolver = TaskConfigResolver.from_file(args.task_config)
-    served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
+    served_model_name = os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
     if args.shuffle:

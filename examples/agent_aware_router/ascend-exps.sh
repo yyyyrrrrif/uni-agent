@@ -48,10 +48,10 @@ run_experiment() {
         ray stop || true
         fuser -k /dev/davinci* || true
         npu-smi info
-        bash "${REPO_ROOT}/examples/llm_router/run_infer.sh" \
+        bash "${REPO_ROOT}/examples/agent_aware_router/run_infer.sh" \
             --model-path "$MODEL" \
             --data-path "$DATASET" \
-            --task-config "${REPO_ROOT}/examples/llm_router/task_config_mini_swe_agent.yaml" \
+            --task-config "${REPO_ROOT}/examples/agent_aware_router/task_config_mini_swe_agent.yaml" \
             --device ascend \
             --n-gpus-per-node 8 \
             --tp 4 \

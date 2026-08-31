@@ -1,4 +1,4 @@
-# Task Config for the mini-swe-agent blackbox recipe (llm_router example).
+# Task Config for the mini-swe-agent blackbox recipe (agent_aware_router example).
 #
 # Each sample row carries its `sandbox.image` + prompt; the fields below are the
 # per-task defaults layered on top by `TaskConfigResolver` (file -> sample ->

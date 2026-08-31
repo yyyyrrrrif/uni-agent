@@ -201,10 +201,10 @@ run_experiment() {
         npu-smi info 2>/dev/null | tail -3 || true
         log "  running -> ${log_file}"
 
-        bash "${REPO_ROOT}/examples/llm_router/run_infer.sh" \
+        bash "${REPO_ROOT}/examples/agent_aware_router/run_infer.sh" \
             --model-path "${MODEL}" \
             --data-path "${DATASET}" \
-            --task-config "${REPO_ROOT}/examples/llm_router/task_config_mini_swe_agent.yaml" \
+            --task-config "${REPO_ROOT}/examples/agent_aware_router/task_config_mini_swe_agent.yaml" \
             --device ascend \
             --nnodes "${NNODES}" \
             --n-gpus-per-node "${N_GPUS_PER_NODE}" \
