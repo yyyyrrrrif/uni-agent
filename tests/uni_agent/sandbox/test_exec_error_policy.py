@@ -25,8 +25,6 @@ import pytest
 from uni_agent.sandbox.base import ExecResult, Sandbox
 from uni_agent.sandbox.registry import get_sandbox_cls
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 class _FakeSandbox(Sandbox):
     """Drive :meth:`Sandbox.exec` with a preset ``_exec`` result / error / liveness."""

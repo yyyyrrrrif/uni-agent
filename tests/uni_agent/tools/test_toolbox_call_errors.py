@@ -18,8 +18,6 @@ from pydantic import BaseModel, Field
 
 from uni_agent.tools import Tool, Toolbox, ToolError, ToolResult
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 class _Echo(Tool):
     """Succeeds, echoing the parsed args + forwarded timeout back as text."""

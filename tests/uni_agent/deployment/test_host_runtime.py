@@ -21,8 +21,6 @@ from swerex.runtime.abstract import (  # noqa: E402
 
 from uni_agent.deployment.host.deployment import HostRuntime  # noqa: E402
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 @pytest_asyncio.fixture
 async def runtime():

@@ -8,8 +8,6 @@ from uni_agent.agents.react.agent import ReActAgent, ReActConfig
 from uni_agent.agents.react.model import OpenAICompatibleChatModel
 from uni_agent.tools import ToolResult
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 class _FakeToolbox:
     def __init__(self):

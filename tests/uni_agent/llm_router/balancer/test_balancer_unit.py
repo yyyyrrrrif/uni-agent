@@ -25,7 +25,7 @@ from ._helpers import (
     _router_config,
 )
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
 # ============================================================

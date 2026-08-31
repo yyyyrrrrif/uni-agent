@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 

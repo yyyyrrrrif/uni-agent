@@ -9,8 +9,6 @@ from uni_agent.tasks.swe_bench import preprocess as swe_bench_preprocess
 from uni_agent.tasks.swe_bench_multilingual import preprocess as multilingual_preprocess
 from uni_agent.tasks.swe_rebench import preprocess as swe_rebench_preprocess
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 class _FakeDataset:
     def __init__(self, rows):

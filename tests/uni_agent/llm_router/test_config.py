@@ -49,7 +49,7 @@ _CN = ["vllm_zmq"]
 # -- ① Input/output normal cases --
 
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
 class TestStrategyNormalInput:

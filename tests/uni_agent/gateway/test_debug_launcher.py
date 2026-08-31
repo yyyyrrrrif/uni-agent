@@ -11,8 +11,6 @@ import pytest
 from examples.gateway import debug_launcher
 from uni_agent.gateway.session import SessionHandle, Trajectory
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 @pytest.mark.cpu
 @pytest.mark.level0

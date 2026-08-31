@@ -6,7 +6,6 @@ import pytest
 
 from uni_agent.tasks import TaskConfig, TaskConfigResolver, get_task
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 _LOCAL_SANDBOX = {"provider": "local"}
 
 

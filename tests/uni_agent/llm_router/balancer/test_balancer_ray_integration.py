@@ -31,7 +31,7 @@ from verl.workers.rollout.router import get_router_handle
 
 ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
 
-pytestmark = [pytest.mark.st, pytest.mark.cpu, pytest.mark.level0]
+pytestmark = [pytest.mark.st, pytest.mark.cpu]
 
 
 @ray.remote

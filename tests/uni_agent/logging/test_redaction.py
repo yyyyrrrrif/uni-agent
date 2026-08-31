@@ -7,8 +7,6 @@ import pytest
 from uni_agent.logging.handlers import _formatter
 from uni_agent.logging.redaction import _redact_sensitive_text
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 @pytest.mark.cpu
 @pytest.mark.level0

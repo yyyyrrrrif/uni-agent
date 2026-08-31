@@ -24,7 +24,7 @@ from uni_agent.llm_router.store.per_request_store import (
     PerRequestStore,
 )
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
 # ── PerRequestStore (plain instances — isolated, not the singleton) ──

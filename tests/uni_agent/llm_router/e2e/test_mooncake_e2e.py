@@ -34,7 +34,6 @@ import time
 
 import pytest
 
-pytestmark = [pytest.mark.st, pytest.mark.gpu, pytest.mark.level1]
 pytestmark = [pytest.mark.e2e, pytest.mark.gpu]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

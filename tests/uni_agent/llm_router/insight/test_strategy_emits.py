@@ -34,7 +34,7 @@ from uni_agent.llm_router.strategies.base import ReplicaInfo
 from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy
 from uni_agent.llm_router.types import MetricKey, SlowCut
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 PROMPT_IDS = [1, 2, 3]
 

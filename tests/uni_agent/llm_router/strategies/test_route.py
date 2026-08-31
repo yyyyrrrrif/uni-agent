@@ -27,7 +27,7 @@ from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
 from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu, pytest.mark.level0]
+pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
 
 # ============================================================

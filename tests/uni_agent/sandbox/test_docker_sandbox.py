@@ -9,8 +9,6 @@ from uni_agent.sandbox.base import ExecResult, Sandbox, SandboxConfig
 from uni_agent.sandbox.docker import DockerSandbox
 from uni_agent.sandbox.registry import SANDBOX_MODULES, build_sandbox
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 def _ok(stdout: str = "") -> ExecResult:
     return ExecResult(exit_code=0, stdout=stdout, stderr="")

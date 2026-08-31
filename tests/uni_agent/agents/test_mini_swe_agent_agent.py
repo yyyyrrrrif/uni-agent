@@ -26,8 +26,6 @@ from uni_agent.agents.mini_swe_agent.agent import (
 )
 from uni_agent.sandbox.base import ExecResult
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 class _FakeSandbox:
     """Records the one ``exec_shell`` call and returns canned stdout."""

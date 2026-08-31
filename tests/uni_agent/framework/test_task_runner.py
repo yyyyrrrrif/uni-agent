@@ -10,8 +10,6 @@ from uni_agent.framework.task_runner import (
 from uni_agent.gateway.session import SessionHandle
 from uni_agent.tasks import TaskConfig, TaskResult
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
-
 
 @pytest.mark.cpu
 @pytest.mark.level0

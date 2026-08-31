@@ -5,7 +5,6 @@ import pytest
 from uni_agent.gateway.adapters.anthropic import anthropic_to_internal
 from uni_agent.gateway.adapters.types import MalformedRequestError
 
-pytestmark = [pytest.mark.cpu, pytest.mark.ut, pytest.mark.level0]
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 BASE = dict(base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
 
