@@ -14,7 +14,7 @@
 
 """Inflight + dispatch counters end-to-end with the REAL inflight_stat collector.
 
-``collector_names`` lists ``inflight_stat``, so the patched
+``KVCacheAwareStrategy.COLLECTOR_NAMES`` lists ``inflight_stat``, so the patched
 ``_FakeCollectorManager`` builds a real ``Collector(CallbackTransport(self),
 InflightDecoder)`` that registers ``on_acquire`` / ``on_release`` on the
 Balancer. acquire bumps the chosen replica's INFLIGHT_COUNT (+1, mirroring verl
@@ -34,7 +34,7 @@ from uni_agent.llm_router.types import MetricKey
 
 from ._helpers import _make_balancer
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 class TestInflightEndToEnd:

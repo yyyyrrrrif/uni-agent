@@ -14,9 +14,9 @@
 
 """Collector config: connection-type tuning parameters shared by all collectors.
 
-Individual collectors are referenced by name (via ``collector_names`` on
-strategies); this config carries the shared tuning knobs grouped by
-connection type, not per-collector definitions.
+Individual collectors are referenced by name (bound on the runtime strategy —
+see ``KVCacheAwareStrategy.COLLECTOR_NAMES``); this config carries the shared
+tuning knobs grouped by connection type, not per-collector definitions.
 """
 
 from __future__ import annotations

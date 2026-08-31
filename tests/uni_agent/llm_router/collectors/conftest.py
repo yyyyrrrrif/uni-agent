@@ -12,155 +12,148 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared fixtures and helpers for collectors integration tests.
+"""Shared fixtures and helpers for collectors unit tests.
 
-All three test modules (vllm_kv_event_collector, vllm_polling_collector,
-route_data_provider_gpu_prefix_hit_rate) share one vLLM process for the
-entire pytest session, avoiding redundant model loading.
-
-The session-scoped ``vllm_kv_service`` fixture starts vLLM with ZMQ KV events
-enabled.  Polling tests also use this server via the ``vllm_service`` alias —
-the polling collector only reads the HTTP ``/metrics`` endpoint, which works
-regardless of whether ZMQ events are enabled.
+Replaces the earlier real-vLLM-service integration test set-up with
+injectable fake transports.  Tests run on CPU without any external
+vLLM or ZMQ dependency.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import signal
-import subprocess
-import sys
-import time
+import asyncio
+import struct
 
-import httpx
+import msgpack
 import pytest
+
+from uni_agent.llm_router.collectors.transport.base import Transport
+from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
+from uni_agent.llm_router.store.per_replica_store import PerReplicaStore
+from uni_agent.llm_router.store.per_request_store import PerRequestStore
+from uni_agent.llm_router.types import Layer
 
 # ── Shared configuration constants ───────────────────────────────────────
 
-VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-4B")
-VLLM_HOST = os.environ.get("VLLM_HOST", "127.0.0.1")
-VLLM_PORT = int(os.environ.get("VLLM_PORT", "8000"))
-NODE_ID = f"{VLLM_HOST}:{VLLM_PORT}"
+NODE_ID = "127.0.0.1:8000"
+BLOCK_SIZE = 16
 
-ZMQ_SUB_PORT = int(os.environ.get("ZMQ_SUB_PORT", "5555"))
-ZMQ_REPLAY_PORT = int(os.environ.get("ZMQ_REPLAY_PORT", "5556"))
+# Prometheus-format metrics text — covers all assertions in the polling tests.
+VLLM_METRICS_TEXT = """\
+# HELP vllm:kv_cache_usage_perc GPU KV cache usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc 0.57
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running 3
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting 7
+"""
 
 
-# ── Shared helper ────────────────────────────────────────────────────────
+# ── Fake transports ──────────────────────────────────────────────────────
 
 
-def send_inference_request(node_id: str, model: str, prompt: str = "hello") -> bool:
-    """POST a chat-completions request to trigger KV cache events.
+class FakeHTTPTransport(Transport):
+    """Fake HTTP transport — injects pre-canned Prometheus text.
 
-    Returns True on HTTP 200, False on any error.
+    ``subscribe(handler)`` feeds ``handler(text, NODE_ID)`` periodically
+    until cancelled, simulating the real HTTP polling loop.
     """
-    try:
-        resp = httpx.post(
-            f"http://{node_id}/v1/chat/completions",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 50,
-                "temperature": 0.7,
-            },
-            timeout=30.0,
-        )
-        return resp.status_code == 200
-    except Exception:
-        return False
 
+    is_async = True
 
-# ── Session-scoped vLLM fixture ──────────────────────────────────────────
+    def __init__(self, text: str, interval: float = 1.0) -> None:
+        self._text = text
+        self._interval = interval
 
-
-@pytest.fixture(scope="session")
-def vllm_kv_service():
-    """Start one vLLM server with ZMQ KV events for the entire test session.
-
-    Binds:
-      - HTTP API at http://<VLLM_HOST>:<VLLM_PORT>   (metrics + completions)
-      - ZMQ PUB  at tcp://*:<ZMQ_SUB_PORT>            (KV-cache event stream)
-      - ZMQ REP  at tcp://*:<ZMQ_REPLAY_PORT>          (event replay)
-
-    Yields ``node_id`` (``"host:port"``).  The process is SIGTERM'd on teardown.
-    """
-    kv_events_config = json.dumps(
-        {
-            "enable_kv_cache_events": True,
-            "publisher": "zmq",
-            "topic": "kv-events",
-            "endpoint": f"tcp://*:{ZMQ_SUB_PORT}",
-            "replay_endpoint": f"tcp://*:{ZMQ_REPLAY_PORT}",
-        }
-    )
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
-        VLLM_MODEL,
-        "--host",
-        VLLM_HOST,
-        "--port",
-        str(VLLM_PORT),
-        "--trust-remote-code",
-        "--tensor_parallel_size",
-        "2",
-        "--dtype",
-        "bfloat16",
-        "--gpu_memory_utilization",
-        "0.6",
-        "--max-model-len",
-        "8192",
-        "--override_generation_config",
-        '{"temperature": 0.8, "top_k": -1, "top_p": 0.9, "repetition_penalty": 1.0, "max_new_tokens": 4096}',
-        "--kv-events-config",
-        kv_events_config,
-    ]
-
-    proc = subprocess.Popen(cmd)
-
-    metrics_url = f"http://{NODE_ID}/metrics"
-    max_wait = 360
-    deadline = time.time() + max_wait
-    ready = False
-
-    while time.time() < deadline:
+    async def subscribe(self, handler):
         try:
-            resp = httpx.get(metrics_url, timeout=5.0)
-            if resp.status_code == 200:
-                ready = True
-                break
-        except (httpx.ConnectError, httpx.TimeoutException):
+            while True:
+                handler(self._text, NODE_ID)
+                await asyncio.sleep(self._interval)
+        except (asyncio.CancelledError, GeneratorExit):
             pass
-        time.sleep(3)
 
-    if not ready:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        pytest.skip(f"vLLM server for {VLLM_MODEL} did not become ready within {max_wait}s")
-
-    yield NODE_ID
-
-    proc.send_signal(signal.SIGTERM)
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+    def stop(self) -> None:
+        pass
 
 
-@pytest.fixture(scope="session")
-def vllm_service(vllm_kv_service):
-    """Alias: polling tests reuse the session-shared vLLM server.
+class FakeZMQTransport(Transport):
+    """Fake ZMQ transport — injects pre-canned msgpack KV-events payloads.
 
-    The polling collector only reads HTTP ``/metrics``; ZMQ KV events
-    being enabled on the same server has no effect on polling tests.
+    ``subscribe(handler)`` replays all payloads in order, then idles until
+    cancelled.
     """
-    return vllm_kv_service
+
+    is_async = True
+
+    def __init__(self, payloads: list[bytes], interval: float = 1.0) -> None:
+        self._payloads = list(payloads)
+        self._interval = interval
+
+    async def subscribe(self, handler):
+        try:
+            for p in self._payloads:
+                handler(p, NODE_ID)
+                await asyncio.sleep(self._interval)
+            while True:
+                await asyncio.sleep(self._interval)
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+
+    def stop(self) -> None:
+        pass
+
+
+# ── KV event payload helpers ────────────────────────────────────────────
+
+
+def _convert_token_ids(raw_ids: list[int], block_size: int) -> bytes:
+    """Encode token IDs as uint32 big-endian bytes (one block)."""
+    if len(raw_ids) != block_size:
+        raise ValueError(f"Expected {block_size} tokens, got {len(raw_ids)}")
+    return struct.pack(f">{block_size}I", *raw_ids)
+
+
+def make_stored_event(
+    block_hash: str,
+    raw_ids: list[int],
+    block_size: int = BLOCK_SIZE,
+    parent: str | None = None,
+    medium: str = "GPU",
+) -> list:
+    """Build a BlockStored event entry: [tag, block_hashes, parent, token_ids, block_size, unused, medium]."""
+    return ["stored", [block_hash], parent, raw_ids, block_size, None, medium]
+
+
+def kv_payload(*events: list) -> bytes:
+    """Pack one or more events as a single msgpack payload.
+
+    Format: ``[timestamp, [[tag, fields...], ...]]``.
+    """
+    return msgpack.packb([1234567890, [list(e) for e in events]])
+
+
+# ── Autouse: reset singleton stores between tests ─────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_store_singletons():
+    """Reset the three singleton stores before each test.
+
+    ``DataStore`` wraps ``PerReplicaStore``, ``KVCacheStore``, and
+    ``PerRequestStore`` — all singletons — so state would otherwise
+    accumulate across test cases.
+    """
+    yield
+    # KVCacheStore
+    kv = KVCacheStore.singleton()
+    kv.block_size = None
+    kv.replicas_by_block.clear()
+    kv._replica_layer_counts = {Layer.GPU: {}, Layer.CPU: {}, Layer.SSD: {}}
+    # PerReplicaStore
+    pr = PerReplicaStore.singleton()
+    pr._data.clear()
+    # PerRequestStore
+    prq = PerRequestStore.singleton()
+    prq.reset()

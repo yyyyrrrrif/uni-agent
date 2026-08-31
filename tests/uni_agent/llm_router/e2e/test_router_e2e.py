@@ -31,17 +31,17 @@ import subprocess
 
 import pytest
 
-pytestmark = [pytest.mark.e2e, pytest.mark.gpu]
+pytestmark = [pytest.mark.level1, pytest.mark.gpu]
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", "..", ".."))
-_RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "run_infer.sh")
+_RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "agent_aware_router", "run_infer.sh")
 # Simulated sandbox runner: drives the gateway session for real but answers
 # tool calls with canned observations (no container). See utils/simulated_sandbox.py.
 _SIMULATED_RUNNER_FQN = "tests.uni_agent.llm_router.e2e.utils.simulated_sandbox.simulated_runner"
-_MODEL = os.environ.get("VLLM_MODEL", "/data1/models/Qwen/Qwen3-4B-Instruct-2507")
-_DATASET = os.environ.get("SWEBENCH_DATASET", "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
-_TASK_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "task_config_mini_swe_agent.yaml")
+_MODEL = os.environ.get("VLLM_MODEL", "/path/to/Qwen/Qwen3-4B-Instruct-2507")
+_DATASET = os.environ.get("SWEBENCH_DATASET", "/path/to/swe_bench_verified_modal.parquet")
+_TASK_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "agent_aware_router", "task_config_mini_swe_agent.yaml")
 _LOG_DIR = "/tmp/e2e_router_logs"
 
 
@@ -110,8 +110,8 @@ class TestKVCAwareRouterE2E:
         routing_count = log.count("routed to server")
         assert routing_count >= 1, f"Expected >=1 routing decision, got {routing_count}"
 
-        # 2. COMBINED scoring (not random fallback)
-        assert "COMBINED" in log, "No COMBINED scoring — strategy may have failed"
+        # 2. CAPACITY_TOKEN_AWARE scoring (not random fallback)
+        assert "CAPACITY_TOKEN_AWARE" in log, "No CAPACITY_TOKEN_AWARE scoring — strategy may have failed"
 
         # 3. End-to-end completion
         assert "mean rm_score" in log, "run_infer.sh did not complete (no rm_score)"

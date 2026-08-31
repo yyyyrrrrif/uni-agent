@@ -36,7 +36,7 @@ from uni_agent.llm_router.collectors.transport.callback import (
 )
 from uni_agent.llm_router.types import MetricKey
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 class TestStatisticEvent:

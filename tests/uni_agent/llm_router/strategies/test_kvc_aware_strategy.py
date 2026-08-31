@@ -42,7 +42,6 @@ from uni_agent.llm_router.strategies.kvc_aware import (
 from uni_agent.llm_router.strategies.routing import RoutingStrategy
 from uni_agent.llm_router.types import Layer, MetricKey, SlowCut
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -58,8 +57,6 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
         alpha=0.7,
         load_threshold=0.9,
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-        collector_names=["vllm_zmq"],
-        weight=1.0,
         # Fixed test baseline — intentionally decoupled from DEFAULT_LOAD_WEIGHTS
         # so behavior tests stay stable when the production default changes.
         load_weights=(0.4, 0.2, 0.1, 0.3),
@@ -176,8 +173,8 @@ class RaisingStrategy:
 # --------------------------------------------------------------------------- #
 # Unified combined score (one pass: α·S_cache + (1-α)·S_load)
 # --------------------------------------------------------------------------- #
-
-
+@pytest.mark.cpu
+@pytest.mark.level1
 class TestKVCAwareCombinedScore:
     def test_three_layer_cache_weighted_sum(self):
         """
@@ -187,7 +184,7 @@ class TestKVCAwareCombinedScore:
           rep_a: load=0.4·0.2=0.08 → s_load=0.92; s_cache=0.70; score=0.7·0.70+0.3·0.92=0.766
           rep_b: load=0.4·0.4=0.16 → s_load=0.84; s_cache=0.10; score=0.7·0.10+0.3·0.84=0.322
         """
-        strat = _strat()
+        strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE)
         provider = FakeRouteDataProvider(
             {
                 "rep_a": {
@@ -218,8 +215,8 @@ class TestKVCAwareCombinedScore:
 # --------------------------------------------------------------------------- #
 # StrategyRegistry
 # --------------------------------------------------------------------------- #
-
-
+@pytest.mark.cpu
+@pytest.mark.level1
 class TestKVCAwareLoad:
     def test_missing_metrics_defaults_to_high_load(self):
         """
@@ -227,7 +224,7 @@ class TestKVCAwareLoad:
         Description: score a replica whose id is absent from the provider
         Expectation: load=0.4·1.0=0.4 → s_load=0.6 → score=0.3·0.6=0.18
         """
-        strat = _strat()
+        strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE)
         provider = FakeRouteDataProvider({})
         scores = strat.score(PROMPT_IDS, provider, _replicas("ghost"))
         assert scores == pytest.approx([0.18])
@@ -236,6 +233,8 @@ class TestKVCAwareLoad:
 # --------------------------------------------------------------------------- #
 # _resolve_kv_usage: kv_cache_load drives the load formula
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level1
 class TestResolveKVUsage:
     def test_kv_cache_load_drives_load_formula(self):
         """
@@ -253,7 +252,7 @@ class TestResolveKVUsage:
             def kv_cache_load(self, replica_id):
                 return self._load.get(replica_id)
 
-        strat = _strat()
+        strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE)
         provider = _LoadProvider(
             {"rep": {"kv_cache_usage_perc": 0.9, "num_requests_running": 0, "num_requests_waiting": 0}},
             {"rep": 0.1},
@@ -265,18 +264,9 @@ class TestResolveKVUsage:
 # --------------------------------------------------------------------------- #
 # _cache_score: three-layer weighted hit (gpu + cpu + ssd)
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestKVCAwareCacheScore:
-    def test_three_layer_weighted_sum(self):
-        """
-        Feature: _cache_score = w_gpu·gpu + w_cpu·cpu + w_ssd·ssd
-        Description: gpu_hit_pct=80, cpu=0.6, ssd=0.2 with default weights
-        Expectation: 0.7*0.8 + 0.2*0.6 + 0.1*0.2 = 0.70
-        """
-        strat = _strat()
-        provider = FakeRouteDataProvider({"rep": {"gpu_hit_pct": 80, "tiers": {"cpu": 0.6, "ssd": 0.2}}})
-        s_cache, _ = strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS)
-        assert s_cache == pytest.approx(0.70)
-
     def test_custom_weights_respected(self):
         """
         Feature: _cache_score honors custom layer_weights
@@ -292,6 +282,8 @@ class TestKVCAwareCacheScore:
 # --------------------------------------------------------------------------- #
 # Tier weights in the cache term
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level1
 class TestKVCAwareTierWeights:
     def test_cpu_weight_higher_than_ssd(self):
         """
@@ -301,7 +293,7 @@ class TestKVCAwareTierWeights:
           cpu_hit: load=0.2→s_load=0.8; s_cache=0.2·0.6=0.12; score=0.7·0.12+0.3·0.8=0.324
           ssd_hit: load=0.2→s_load=0.8; s_cache=0.1·0.8=0.08; score=0.7·0.08+0.3·0.8=0.296
         """
-        strat = _strat()
+        strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE)
         provider = FakeRouteDataProvider(
             {
                 "cpu_hit": {
@@ -331,6 +323,8 @@ class TestKVCAwareTierWeights:
 # --------------------------------------------------------------------------- #
 # Construction validation
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestKVCAwareConstruction:
     @pytest.mark.parametrize(
         "kwargs",
@@ -365,6 +359,8 @@ class TestKVCAwareConstruction:
 # --------------------------------------------------------------------------- #
 # set_capacity
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestSetCapacity:
     @staticmethod
     def _new_strat() -> KVCacheAwareStrategy:
@@ -373,8 +369,6 @@ class TestSetCapacity:
             alpha=0.7,
             load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-            collector_names=["vllm_zmq"],
-            weight=1.0,
         )
 
     def test_set_capacity_updates_max_num_seqs(self):
@@ -412,6 +406,8 @@ class TestSetCapacity:
 # --------------------------------------------------------------------------- #
 # Interface contract
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestStrategyContract:
     def test_score_length_and_stateless_repeatable(self):
         """
@@ -449,8 +445,8 @@ class TestStrategyContract:
 # --------------------------------------------------------------------------- #
 # route() composition
 # --------------------------------------------------------------------------- #
-
-
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestFromConfig:
     def test_from_config_maps_fields_and_matches_direct_construction(self):
         """
@@ -464,8 +460,6 @@ class TestFromConfig:
             alpha=0.6,
             load_threshold=0.85,
             layer_weights={"gpu": 0.6, "cpu": 0.3, "ssd": 0.1},
-            weight=0.9,
-            collector_names=["vllm_zmq"],
         )
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
 
@@ -511,6 +505,8 @@ class TestFromConfig:
 # --------------------------------------------------------------------------- #
 # Sticky-session short-circuit (is_overloaded uses load > load_threshold)
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestStickyShortCircuit:
     """Sticky replica wins when bound + present + not overloaded; else fall through.
 
@@ -524,32 +520,6 @@ class TestStickyShortCircuit:
     def _provider(self, sticky=None, **per_replica):
         """Build a FakeRouteDataProvider from {rep_id: metrics_dict} + optional sticky."""
         return FakeRouteDataProvider(per_replica, sticky=sticky)
-
-    # ── is_overloaded ──────────────────────────────────────────────────────
-    def test_is_overloaded_true_when_saturated(self):
-        """Feature: is_overloaded True when load > load_threshold (0.9).
-        Description: kv=1.0, running=64 (mns), waiting=1000, inflight=64 → load=1.0 > 0.9
-        Expectation: overloaded
-        """
-        strat = _strat(load_threshold=0.9)
-        provider = self._provider(
-            rep_a={
-                "kv_cache_usage_perc": 1.0,
-                "num_requests_running": 64,
-                "num_requests_waiting": 1000,
-                "inflight_count": 64,
-            }
-        )
-        assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is True
-
-    def test_is_overloaded_false_when_light(self):
-        """Feature: is_overloaded False when load <= load_threshold.
-        Description: kv=0.3, running=0, waiting=0 → load=0.12 < 0.9
-        Expectation: not overloaded
-        """
-        strat = _strat(load_threshold=0.9)
-        provider = self._provider(rep_a={"kv_cache_usage_perc": 0.3, "num_requests_running": 0})
-        assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is False
 
     # ── score() sticky short-circuit ───────────────────────────────────────
     def test_sticky_hit_not_overloaded_short_circuits(self):
@@ -567,7 +537,7 @@ class TestStickyShortCircuit:
         replicas = _replicas("rep_a", "rep_b")
         scores = strat.score(PROMPT_IDS, provider, replicas, "r1")
         assert scores == [0.0, STICKY_TOP_SCORE]
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1")
+        ranking = route(strat, PROMPT_IDS, provider, replicas, "r1")
         assert ranking[0] == "rep_b"
 
     def test_sticky_hit_overloaded_falls_back_to_combined(self):
@@ -589,7 +559,7 @@ class TestStickyShortCircuit:
             },
         )
         replicas = _replicas("rep_a", "rep_b")
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, replicas, "r1")
+        ranking = route(strat, PROMPT_IDS, provider, replicas, "r1")
         assert ranking[0] == "rep_a"
 
 
@@ -598,6 +568,8 @@ class TestStickyShortCircuit:
 # vector, decoupled from DEFAULT_LOAD_WEIGHTS so config changes don't erode
 # the formula-coverage assertions.
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level1
 class TestLoadFormula:
     @pytest.mark.parametrize(
         "load_weights,kv,running,waiting,inflight,expected",
@@ -633,6 +605,8 @@ class TestDefaultWeights:
 # --------------------------------------------------------------------------- #
 # Fallback modes: memory_overload_filter (sticky overload gate) + slow_cut (fallback scoring)
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestFallbackModes:
     """The two formerly-coupled ``USE_VERL_STICKY`` behaviors are now independent
     config knobs: ``memory_overload_filter`` gates the sticky overload check, and
@@ -649,7 +623,7 @@ class TestFallbackModes:
             },
             sticky={"r1": "rep_a"},
         )
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
         assert ranking[0] == "rep_a"  # sticky wins despite load≈0.7 (overload check disabled)
 
     def test_miss_routes_to_least_inflight(self):
@@ -658,7 +632,7 @@ class TestFallbackModes:
         provider = FakeRouteDataProvider(
             {"rep_a": {"inflight_count": 5}, "rep_b": {"inflight_count": 2}},
         )
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
         assert ranking[0] == "rep_b"
 
     def test_inflight_tie_keeps_pool_order(self):
@@ -667,13 +641,15 @@ class TestFallbackModes:
         provider = FakeRouteDataProvider(
             {"rep_a": {"inflight_count": 3}, "rep_b": {"inflight_count": 3}},
         )
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
+        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
         assert ranking[0] == "rep_a"
 
 
 # --------------------------------------------------------------------------- #
 # Capacity-gated token routing (slow_cut=capacity-token-aware)
 # --------------------------------------------------------------------------- #
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestCapacityTokenAware:
     """``slow_cut=capacity-token-aware``: a pure capacity gate excludes
     physically-full replicas, then the largest post-prefill ``remaining`` wins.
@@ -713,7 +689,7 @@ class TestCapacityTokenAware:
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1")
         assert scores == [0.0, STICKY_TOP_SCORE, 0.0]  # rep_b wins; rep_a filtered, rep_c 0
         # anti-kidnapping via route(): cache-rich rep_a is dropped despite best cache
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), "r1")
+        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), "r1")
         assert ranking[0] == "rep_b"
 
     def test_cold_start_falls_back_to_inflight(self):

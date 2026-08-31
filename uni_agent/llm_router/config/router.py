@@ -142,10 +142,6 @@ class KVCAwareConfig:
             errors.append("strategies must be non-empty")
         elif not isinstance(self.strategies, list):
             errors.append("strategies must be a list")
-        else:
-            total_weight = sum(s.weight for s in self.strategies)
-            if not (0.9 <= total_weight <= 1.1):
-                errors.append(f"sum of strategy weights must be ~1.0, got {total_weight}")
 
         if errors:
             raise ConfigError("; ".join(errors))

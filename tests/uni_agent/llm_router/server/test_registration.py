@@ -25,7 +25,7 @@ from ``rollout.name`` (so the replica must NOT change the name prefix).
 
 import pytest
 
-pytestmark = [pytest.mark.st, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 vllm = pytest.importorskip("vllm")  # noqa: F841  (server import chain needs it)
 

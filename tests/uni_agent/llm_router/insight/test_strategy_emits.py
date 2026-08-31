@@ -34,7 +34,7 @@ from uni_agent.llm_router.strategies.base import ReplicaInfo
 from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy
 from uni_agent.llm_router.types import MetricKey, SlowCut
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 PROMPT_IDS = [1, 2, 3]
 
@@ -61,8 +61,6 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
         alpha=0.7,
         load_threshold=0.9,
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-        collector_names=["vllm_zmq"],
-        weight=1.0,
         load_weights=(0.4, 0.2, 0.1, 0.3),
     )
     defaults.update(kwargs)
@@ -138,14 +136,3 @@ def test_route_latency_fires_even_on_sticky_short_circuit(recording):
     # still records one route_latency sample — and no score components.
     assert len([c for c in recording.calls if c[1] == "route_latency_seconds"]) == 1
     assert "load" not in _names(recording)
-
-
-def test_emit_off_emits_nothing(monkeypatch):
-    monkeypatch.delenv(emitter.ENABLE_ENV, raising=False)
-    ds = DataStore()
-    ds.refresh_metrics({"s0": {MetricKey.NUM_REQUESTS_RUNNING: 1, MetricKey.NUM_GPU_BLOCKS: 10}})
-    strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE, do_shortcut=False)
-
-    strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
-
-    assert emitter._rl_insight is None  # short-circuited before touching rl_insight

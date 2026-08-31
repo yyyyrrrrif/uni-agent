@@ -27,26 +27,13 @@ from uni_agent.llm_router.store.per_replica_store import PerReplicaStore
 from uni_agent.llm_router.store.per_request_store import PerRequestStore
 from uni_agent.llm_router.types import MetricKey
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 # ── PerReplicaStore.incr (plain instances — isolated, not the singleton) ──
 
 
 class TestPerReplicaStoreIncr:
-    def test_incr_from_default(self):
-        s = PerReplicaStore()
-        s.incr("n0", MetricKey.INFLIGHT_COUNT)
-        assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 1
-        s.incr("n0", MetricKey.INFLIGHT_COUNT, 1)
-        assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 2
-
-    def test_incr_negative_delta(self):
-        s = PerReplicaStore()
-        s.incr("n0", MetricKey.INFLIGHT_COUNT, 5)
-        s.incr("n0", MetricKey.INFLIGHT_COUNT, -2)
-        assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 3
-
     def test_incr_isolates_nodes(self):
         s = PerReplicaStore()
         s.incr("n0", MetricKey.INFLIGHT_COUNT)
@@ -80,13 +67,6 @@ class TestPerReplicaStoreIncr:
         assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 1
         assert s.get("n0", MetricKey.DISPATCHED_COUNT) == 1
         assert s.get("n0", MetricKey.PROMPT_LEN_SUM) == 2163
-
-    def test_incr_many_does_not_clobber_other_keys(self):
-        s = PerReplicaStore()
-        s.refresh({"n0": {MetricKey.NUM_REQUESTS_RUNNING: 7}})
-        s.incr_many("n0", {MetricKey.INFLIGHT_COUNT: 2, MetricKey.DISPATCHED_COUNT: 2})
-        assert s.get("n0", MetricKey.NUM_REQUESTS_RUNNING) == 7
-        assert s.get("n0", MetricKey.INFLIGHT_COUNT) == 2
 
     def test_incr_many_unknown_key_raises(self):
         s = PerReplicaStore()

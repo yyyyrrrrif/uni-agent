@@ -27,7 +27,7 @@ from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 from uni_agent.llm_router.strategies import ReplicaInfo, StrategyRegistry, route
 from uni_agent.llm_router.strategies.kvc_aware import KVCacheAwareStrategy
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 # ============================================================
@@ -153,8 +153,6 @@ def _strat(**kwargs):
         alpha=0.7,
         load_threshold=0.9,
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-        collector_names=["vllm_zmq"],
-        weight=1.0,
         load_weights=(0.4, 0.2, 0.1, 0.3),
     )
     defaults.update(kwargs)
@@ -175,24 +173,12 @@ class TestRoute:
         """
         provider = FakeRouteDataProvider({})
         ranking = route(
-            [(ConstantStrategy([0.2, 0.5, 0.1]), 1.0)],
+            ConstantStrategy([0.2, 0.5, 0.1]),
             PROMPT_IDS,
             provider,
             _replicas("rep_a", "rep_b", "rep_c"),
         )
         assert ranking == ["rep_b", "rep_a", "rep_c"]
-
-    def test_multi_strategy_weighted_sum(self):
-        """
-        Feature: multiple strategies are combined by weighted sum
-        """
-        provider = FakeRouteDataProvider({})
-        strategies = [
-            (ConstantStrategy([1.0, 2.0, 3.0]), 0.5),
-            (ConstantStrategy([3.0, 1.0, 0.0]), 0.5),
-        ]
-        ranking = route(strategies, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"))
-        assert ranking[0] == "rep_a"
 
     def test_overloaded_present_in_ranking(self):
         """
@@ -224,7 +210,7 @@ class TestRoute:
                 },
             }
         )
-        ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "overloaded"))
+        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "overloaded"))
         assert set(ranking) == {"rep_a", "rep_b", "overloaded"}
 
     def test_empty_pool_raises(self):
@@ -232,14 +218,14 @@ class TestRoute:
         Feature: route() raises RuntimeError when the replica list is empty
         """
         with pytest.raises(RuntimeError):
-            route([(ConstantStrategy([]), 1.0)], PROMPT_IDS, FakeRouteDataProvider({}), [])
+            route(ConstantStrategy([]), PROMPT_IDS, FakeRouteDataProvider({}), [])
 
     def test_length_mismatch_falls_back_to_random(self):
         """
         Feature: route() falls back to random order when score() returns wrong-length list
         """
         ranking = route(
-            [(BadLengthStrategy(), 1.0)],
+            BadLengthStrategy(),
             PROMPT_IDS,
             FakeRouteDataProvider({}),
             _replicas("rep_a", "rep_b"),
@@ -250,7 +236,7 @@ class TestRoute:
         """
         Feature: exceptions from score() cause route() to fall back to random order
         """
-        ranking = route([(RaisingStrategy(), 1.0)], PROMPT_IDS, FakeRouteDataProvider({}), _replicas("rep_a", "rep_b"))
+        ranking = route(RaisingStrategy(), PROMPT_IDS, FakeRouteDataProvider({}), _replicas("rep_a", "rep_b"))
         assert set(ranking) == {"rep_a", "rep_b"}
 
     def test_nan_score_ranked_last(self):
@@ -259,7 +245,7 @@ class TestRoute:
         """
         provider = FakeRouteDataProvider({})
         ranking = route(
-            [(ConstantStrategy([float("nan"), 0.1, 0.5]), 1.0)],
+            ConstantStrategy([float("nan"), 0.1, 0.5]),
             PROMPT_IDS,
             provider,
             _replicas("nan_rep", "low_rep", "high_rep"),

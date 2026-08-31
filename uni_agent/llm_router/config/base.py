@@ -93,24 +93,8 @@ def _multiline_repr(obj: Any, indent: int = 0) -> str:
 class StrategyConfig:
     """Base config for routing strategies.
 
-    All strategy configs inherit this and must provide ``weight`` and
-    ``collector_names`` (the list of collector names this strategy uses).
-
-    Attributes:
-        weight: Multi-strategy weighting coefficient (0 < weight ≤ 1).
-        collector_names: Collector names this strategy binds to.
+    Concrete strategy configs (e.g. ``KVCAwareStrategyConfig``) inherit this
+    base and carry their own scoring-specific fields.
     """
-
-    weight: float
-    collector_names: list[str]
-
-    def __post_init__(self) -> None:
-        if not (0 < self.weight <= 1):
-            raise ConfigError(f"weight must be in (0, 1], got {self.weight}")
-        if not isinstance(self.collector_names, list | ListConfig):
-            raise ConfigError(f"collector_names must be a list, got {type(self.collector_names).__name__}")
-        # Normalize ListConfig → plain list for consistent downstream use
-        if isinstance(self.collector_names, ListConfig):
-            object.__setattr__(self, "collector_names", list(self.collector_names))
 
     __repr__ = _multiline_repr

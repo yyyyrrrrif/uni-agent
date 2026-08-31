@@ -36,6 +36,10 @@ STICKY_TOP_SCORE = 1e9
 
 DEFAULT_LOAD_WEIGHTS: tuple[float, float, float, float] = (0.5, 0.0, 0.0, 0.5)
 
+# Collectors this strategy reads from the DataStore. Bound by name here
+# (not via config) — the Balancer starts exactly these collectors.
+COLLECTOR_NAMES: list[str] = ["vllm_zmq", "vllm_metrics", "sticky_stat", "inflight_stat"]
+
 
 class StrategyError(Exception):
     """Strategy construction or scoring error."""
@@ -44,19 +48,20 @@ class StrategyError(Exception):
 class KVCacheAwareStrategy:
     """Runtime strategy constructed from a ``KVCAwareStrategyConfig``."""
 
+    # Collector names this strategy binds to (see module-level ``COLLECTOR_NAMES``).
+    collection_names = COLLECTOR_NAMES
+
     def __init__(
         self,
         *,
         alpha: float,
         load_threshold: float,
         layer_weights: dict[Layer, float],
-        collector_names: list[str],
-        weight: float,
         memory_overload_filter: bool = True,
         do_shortcut: bool = True,
-        slow_cut: SlowCut | str = SlowCut.PREFIX_LOAD_AWARE,
+        slow_cut: SlowCut | str = SlowCut.CAPACITY_TOKEN_AWARE,
         load_weights: tuple[float, float, float, float] = DEFAULT_LOAD_WEIGHTS,
-        overload_mode: OverloadMode | str = OverloadMode.KV_LOAD,
+        overload_mode: OverloadMode | str = OverloadMode.KV_CACHE_USAGE_PERC,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
@@ -93,8 +98,6 @@ class KVCacheAwareStrategy:
         self.alpha = float(alpha)
         self.load_threshold = float(load_threshold)
         self.layer_weights = dict(layer_weights)
-        self.collector_names = collector_names
-        self.weight = weight
         self.memory_overload_filter = memory_overload_filter
         self.do_shortcut = do_shortcut
         self.slow_cut = slow_cut
@@ -130,8 +133,6 @@ class KVCacheAwareStrategy:
             alpha=cfg.alpha,
             load_threshold=cfg.load_threshold,
             layer_weights=cfg.layer_weights,
-            collector_names=cfg.collector_names,
-            weight=cfg.weight,
             memory_overload_filter=cfg.memory_overload_filter,
             do_shortcut=cfg.do_shortcut,
             slow_cut=cfg.slow_cut,

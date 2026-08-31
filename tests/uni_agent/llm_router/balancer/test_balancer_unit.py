@@ -25,7 +25,7 @@ from ._helpers import (
     _router_config,
 )
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 # ============================================================
@@ -36,21 +36,24 @@ pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 class TestKVCAwareBalancerConstruction:
     """B01-Bnn: __init__ wiring and validation."""
 
-    def test_b01_normal_construction_wires_components(self):
+    def test_normal_construction_wires_components(self):
         """
-        Feature: construction wires config/provider/strategies/servers
+        Feature: construction wires config/provider/strategy/servers
         Description: KVCAwareBalancer({"s0": h0}, router_config)
-        Expectation: _provider built and started; _strategies wired with weight
+        Expectation: _provider built and started; _strategy wired
         """
         balancer = KVCAwareBalancer({"s0": "h0"}, _router_config())
         assert balancer._provider.started is True
-        assert balancer._provider.collection_names == ["inflight_stat", "sticky_stat", "vllm_zmq"]
-        assert len(balancer._strategies) == 1
-        strat, weight = balancer._strategies[0]
+        assert balancer._provider.collection_names == [
+            "inflight_stat",
+            "sticky_stat",
+            "vllm_metrics",
+            "vllm_zmq",
+        ]
+        strat = balancer._strategy
         assert isinstance(strat, KVCacheAwareStrategy)
-        assert weight == 1.0
 
-    def test_b02_empty_servers_raises_value_error(self):
+    def test_empty_servers_raises_value_error(self):
         """
         Feature: empty servers pool is rejected
         Description: KVCAwareBalancer({}, router_config)
@@ -59,7 +62,7 @@ class TestKVCAwareBalancerConstruction:
         with pytest.raises(ValueError):
             KVCAwareBalancer({}, _router_config())
 
-    def test_b02b_missing_strategies_raises_config_error(self):
+    def test_missing_strategies_raises_config_error(self):
         """
         Feature: a config missing strategies is rejected (delegated to from_config)
         Description: KVCAwareBalancer with an empty router_config
@@ -79,7 +82,7 @@ class TestKVCAwareBalancerConstruction:
 class TestTrivialMethods:
     """B04-B06: the no-algorithm Protocol methods."""
 
-    def test_b04_trivial_protocol_methods(self):
+    def test_trivial_protocol_methods(self):
         """
         Feature: get_all_servers / get_status / release_server — the no-algorithm Protocol methods
         Description: construct a two-server balancer; exercise the three trivial methods in turn
@@ -98,7 +101,7 @@ class TestTrivialMethods:
         # provider is the injected _FakeCollectorManager in unit tests; real env reports
         # "CollectorManager". Assert it matches the constructed provider's type.
         assert status["provider"] == type(balancer._provider).__name__
-        assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
+        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]
         assert set(status["servers"]) == {"s0", "s1"}
         assert status["route_calls"] == 0
 
@@ -116,7 +119,7 @@ class TestTrivialMethods:
 class TestAcquireServer:
     """B07-Bnn: acquire_server delegates to route() and maps back to a handle."""
 
-    def test_b08_prompt_ids_and_replicas_passed_to_route(self, monkeypatch):
+    def test_prompt_ids_and_replicas_passed_to_route(self, monkeypatch):
         """
         Feature: prompt_ids and pool replicas are forwarded to route()
         Description: spy on route() and capture its arguments
@@ -137,7 +140,7 @@ class TestAcquireServer:
         assert seen["prompt_ids"] == [7, 8, 9]
         assert set(seen["replica_ids"]) == {"s0", "s1"}
 
-    def test_b09_maps_returned_id_to_handle(self, monkeypatch):
+    def test_maps_returned_id_to_handle(self, monkeypatch):
         """
         Feature: the returned top id maps to its actor handle
         Description: mock route() to return ["s1","s0"]
@@ -149,7 +152,7 @@ class TestAcquireServer:
         balancer = _make_balancer({"s0": "h0", "s1": "h1"})
         assert balancer.acquire_server("r1", [1]) == ("s1", "h1")
 
-    def test_b10_empty_ranking_raises_runtime_error(self, monkeypatch):
+    def test_empty_ranking_raises_runtime_error(self, monkeypatch):
         """
         Feature: an empty ranking (no available / all blacklisted) raises
         Description: mock route() to return []
@@ -162,7 +165,7 @@ class TestAcquireServer:
         with pytest.raises(RuntimeError):
             balancer.acquire_server("r1", [1])
 
-    def test_b11_none_prompt_ids_passes_through(self, monkeypatch):
+    def test_none_prompt_ids_passes_through(self, monkeypatch):
         """
         Feature: prompt_ids=None is forwarded unchanged (strategy degrades to load)
         Description: acquire_server("r1", None); spy on route()
@@ -191,7 +194,7 @@ class TestAcquireServer:
 class TestServerPoolMutations:
     """B12-Bnn: add/remove mutate the server pool."""
 
-    def test_b12_add_servers_grows_pool_and_overwrites_handle(self):
+    def test_add_servers_grows_pool_and_overwrites_handle(self):
         """
         Feature: add_servers grows the pool and overwrites existing ids (bulk-add semantics)
         Description: add_servers({"s0": new, "s1": h1, "s2": h2}) on a one-server balancer {s0}
@@ -202,7 +205,7 @@ class TestServerPoolMutations:
         assert set(balancer.get_all_servers()) == {"s0", "s1", "s2"}
         assert balancer._servers["s0"] == "h0_new"  # existing id overwritten
 
-    def test_b15_remove_servers_shrinks_pool_and_unknown_is_noop(self):
+    def test_remove_servers_shrinks_pool_and_unknown_is_noop(self):
         """
         Feature: remove_servers shrinks the pool; unknown ids are a silent no-op
         Description: remove_servers(["s0"]) then remove_servers(["s999"]) on {s0,s1}
@@ -224,7 +227,7 @@ class TestServerPoolMutations:
 class TestEndToEndFlows:
     """B17-B18: multi-step flows over the balancer (route() mocked)."""
 
-    def test_b17_acquire_release_acquire(self, monkeypatch):
+    def test_acquire_release_acquire(self, monkeypatch):
         """
         Feature: release does not affect subsequent routing
         Description: acquire → release → acquire with route() returning s0
@@ -240,7 +243,7 @@ class TestEndToEndFlows:
         assert first == ("s0", "h0")
         assert second == ("s0", "h0")
 
-    def test_b18_dynamic_add_remove_then_route(self, monkeypatch):
+    def test_dynamic_add_remove_then_route(self, monkeypatch):
         """
         Feature: pool mutations take effect for subsequent routing
         Description: route() returns pool replicas in order; add then remove between acquires
@@ -261,7 +264,7 @@ class TestEndToEndFlows:
         assert "s0" not in balancer.get_all_servers()
         assert balancer.acquire_server("r2", [1])[0] == "s3"
 
-    def test_b19_router_class_fqn_importable(self):
+    def test_router_class_fqn_importable(self):
         """
         Feature: the YAML router_class FQN resolves to KVCAwareBalancer
         Description: importlib.import_module + getattr on the documented FQN

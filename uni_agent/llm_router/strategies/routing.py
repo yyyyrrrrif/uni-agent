@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""route() — weighted replica ranking for the KVCAware router.
+"""route() — replica ranking for the KVCAware router.
 
-The Balancer delegates each request to ``route(strategies, prompt_ids,
-provider, replicas)`` and maps ``ranking[0]`` back to a server handle.
+The Balancer delegates each request to ``route(strategy, prompt_ids,
+store, replicas)`` and maps ``ranking[0]`` back to a server handle.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ logger = get_router_logger("routing")
 class RoutingStrategy(Protocol):
     """Routing scoring strategy.
 
-    Each strategy scores a batch of replicas independently and returns a list
-    of the same length and order. ``route()`` weighted-sums the outputs.
+    The strategy scores a batch of replicas and returns a list of the same
+    length and order. ``route()`` ranks replicas by these scores.
     """
 
     def score(
@@ -61,27 +61,27 @@ def _rank_key(score: float) -> float:
 
 
 def route(
-    strategies: list[tuple[Any, float]],
+    strategy: Any,
     prompt_ids: list[int] | None,
     store: Any,
     replicas: list[Any],
     request_id: str | None = None,
 ) -> list[str]:
-    """Return replica ids ranked best-first.
+    """Return replica ids ranked best-first by ``strategy``.
 
-    Falls back to a random shuffle of replica ids if any strategy raises or
+    Falls back to a random shuffle of replica ids if the strategy raises or
     returns a wrong-length score list — routing remains available even when
     metrics are temporarily unavailable.
 
     Args:
-        strategies: ``[(strategy, weight), ...]`` — weighted strategies.
+        strategy: the routing strategy that scores the replicas.
         prompt_ids: prompt token ids (content-aware routing; may be ``None``).
         store: ``DataStore`` for metric + sticky-session queries.
         replicas: ``[ReplicaInfo, ...]`` — candidate replicas.
         request_id: session id for sticky-session routing (may be ``None``).
 
     Returns:
-        Replica ids sorted by total score, best first. Falls back to random
+        Replica ids sorted by score, best first. Falls back to random
         order on scoring failure.
 
     Raises:
@@ -91,29 +91,25 @@ def route(
     if n == 0:
         raise RuntimeError("no available replicas")
 
-    final = [0.0] * n
-    for strategy, weight in strategies:
-        name = type(strategy).__name__
-        try:
-            scores = strategy.score(
-                prompt_ids,
-                store,
-                replicas,
-                request_id,
-            )
-            if len(scores) != n:
-                raise ValueError(f"{name}.score() returned {len(scores)} scores, expected {n}")
-        except Exception as exc:  # noqa: BLE001
-            ids = [r.replica_id for r in replicas]
-            random.shuffle(ids)
-            logger.warning(
-                f"route(): {name} failed ({type(exc).__name__}: {exc}), falling back to random order",
-            )
-            return ids
-        for idx in range(n):
-            final[idx] += weight * scores[idx]
+    name = type(strategy).__name__
+    try:
+        scores = strategy.score(
+            prompt_ids,
+            store,
+            replicas,
+            request_id,
+        )
+        if len(scores) != n:
+            raise ValueError(f"{name}.score() returned {len(scores)} scores, expected {n}")
+    except Exception as exc:  # noqa: BLE001
+        ids = [r.replica_id for r in replicas]
+        random.shuffle(ids)
+        logger.warning(
+            f"route(): {name} failed ({type(exc).__name__}: {exc}), falling back to random order",
+        )
+        return ids
 
-    ranking = sorted(range(n), key=lambda idx: _rank_key(final[idx]), reverse=True)
-    scores_str = ", ".join(f"{replicas[idx].replica_id}={final[idx]:.4f}" for idx in ranking)
+    ranking = sorted(range(n), key=lambda idx: _rank_key(scores[idx]), reverse=True)
+    scores_str = ", ".join(f"{replicas[idx].replica_id}={scores[idx]:.4f}" for idx in ranking)
     logger.info(f"route(): replicas={n} ranking=[{scores_str}]")
     return [replicas[idx].replica_id for idx in ranking]

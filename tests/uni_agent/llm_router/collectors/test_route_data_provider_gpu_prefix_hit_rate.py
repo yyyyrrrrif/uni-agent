@@ -12,148 +12,109 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for DataStore.get_layer_prefix_hit_rate with real vLLM service + ZMQ KV events.
+"""Tests for DataStore.get_layer_prefix_hit_rate via injected KV events.
 
 Test flow:
-1. Launch a real vLLM model service with kv-events-config enabled (ZMQ publisher).
-2. Create CollectorManager with collection_names=["vllm_zmq"], which internally
-   creates a Collector(ZMQTransport, VLLMKVDecoder) via get_collector().
-3. Call provider.start() to begin event subscription.
-4. Send inference requests via httpx to trigger KV cache block-stored events.
-5. Obtain prompt token IDs via vLLM /tokenize endpoint (messages format, with chat template).
-6. Call DataStore().get_layer_prefix_hit_rate(prompt_ids) and verify the results.
+1. Create Collector(FakeZMQTransport, VLLMKVDecoder).
+2. Call start() to begin event processing.
+3. Inject ChainBlocks of a "long" prompt through the fake transport.
+4. Compute the prefix-hash chains of the long and short prompts locally.
+5. Call DataStore().get_layer_prefix_hit_rate(node_id, hash_chain, Layer.GPU)
+   and verify the results.
+
+No real vLLM service is required.
 """
 
 from __future__ import annotations
 
 import time
 
-import httpx
 import pytest
-from conftest import NODE_ID, VLLM_MODEL, ZMQ_REPLAY_PORT, ZMQ_SUB_PORT, send_inference_request
+from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event
 
-from uni_agent.llm_router.collectors.provider import CollectorManager
-from uni_agent.llm_router.config.collector import CollectorConfig
+from uni_agent.llm_router.collectors.collector import Collector
+from uni_agent.llm_router.collectors.decoder.vllm.kv import VLLMKVDecoder
 from uni_agent.llm_router.store.data_store import DataStore
 from uni_agent.llm_router.types import Layer
+from uni_agent.llm_router.utils.hash import get_prefix_hashes_incremental
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
+
+WAIT = 0.3
+
+# Two full blocks of tokens: a "long" prompt and its strict prefix "short".
+LONG_IDS = list(range(2 * BLOCK_SIZE))
+SHORT_IDS = LONG_IDS[:BLOCK_SIZE]
 
 
-def _get_token_ids(node_id: str, model: str, prompt: str) -> list[int]:
-    """Get prompt token IDs from vLLM's /tokenize endpoint with chat template applied.
+def _make_collector(payloads):
+    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVDecoder())
 
-    Must use messages format so the chat template is applied — the same
-    template vLLM applies during /v1/chat/completions inference.  KV cache
-    blocks are computed from the fully-formatted sequence (including special
-    tokens like <|im_start|>user\\n...<|im_end|>\\n<|im_start|>assistant\\n),
-    so the token IDs used for prefix hash lookup must match that sequence.
 
-    Falls back to transformers AutoTokenizer + apply_chat_template if
-    /tokenize is unavailable.
+def _inject_long_prompt(store: DataStore):
+    """Inject chained BlockStored events for the long prompt into the KV store.
+
+    The two blocks share a chain: block 1's parent is block 0's remote hash,
+    so the decoder computes local hashes identical to
+    ``get_prefix_hashes_incremental`` on the same token IDs.
     """
-    try:
-        resp = httpx.post(
-            f"http://{node_id}/tokenize",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "add_generation_prompt": True,
-            },
-            timeout=10.0,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("tokens", [])
-    except Exception:
-        pass
-
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    messages = [{"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    return tokenizer(text, add_special_tokens=False).input_ids
-
-
-def _make_provider(node_id: str) -> CollectorManager:
-    return CollectorManager(
-        collectors_config=CollectorConfig(),
-        collection_names=["vllm_zmq"],
-        kv_event_endpoints={
-            node_id: [f"127.0.0.1:{ZMQ_SUB_PORT}", f"127.0.0.1:{ZMQ_REPLAY_PORT}", "zmq", "kv-events"],
-        },
+    collector = _make_collector(
+        [
+            kv_payload(make_stored_event("rh0", LONG_IDS[:BLOCK_SIZE], parent=None)),
+            kv_payload(make_stored_event("rh1", LONG_IDS[BLOCK_SIZE:], parent="rh0")),
+        ]
     )
+    collector.start()
+    time.sleep(WAIT)
+    collector.stop()
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────
+def _hash_chain(token_ids: list[int]) -> list[str]:
+    """Compute the full-block prefix hash chain for token IDs."""
+    hashes, _ = get_prefix_hashes_incremental(token_ids, BLOCK_SIZE, 0, 0)
+    return [str(h) for h in hashes]
 
 
-@pytest.mark.st
-@pytest.mark.gpu
-class TestGpuPrefixHitRateWithRealService:
-    """Integration tests: DataStore.get_layer_prefix_hit_rate against a live vLLM ZMQ publisher."""
+class TestGpuPrefixHitRate:
+    """Unit tests: DataStore.get_layer_prefix_hit_rate with injected KV events."""
 
-    def test_prefix_hit_rate_with_partial_match(self, vllm_kv_service):
+    def test_prefix_hit_rate_with_partial_match(self):
         """
         Feature: get_layer_prefix_hit_rate returns 100% hit rate for a shorter prompt
         Description:
-            1. Send an inference request with a long prompt A.
-            2. Call get_layer_prefix_hit_rate with prompt B that is a strict prefix of A.
+            1. Inject KV cache blocks for a long prompt A.
+            2. Call get_layer_prefix_hit_rate with the hash chain of prompt B
+               that is a strict prefix of A.
         Expectation:
             Since B's blocks are a subset of A's cached blocks, all of B's prefix
-            blocks are cached → hit_rate = 100.
+            blocks are cached -> hit_rate = 100.
         """
-        prompt_long = (
-            "The history of artificial intelligence began in the 1950s and has evolved dramatically since then"
-        )
-        prompt_short = "The history of artificial intelligence began in the 1950s"
-
-        long_ids = _get_token_ids(vllm_kv_service, VLLM_MODEL, prompt_long)
-        short_ids = _get_token_ids(vllm_kv_service, VLLM_MODEL, prompt_short)
-        assert len(short_ids) < len(long_ids), (
-            f"Short prompt should have fewer tokens than long, got short={len(short_ids)}, long={len(long_ids)}"
-        )
-
-        provider = _make_provider(vllm_kv_service)
-        provider.start()
-        time.sleep(5.0)
-        send_inference_request(vllm_kv_service, VLLM_MODEL, prompt_long)
-        time.sleep(8.0)
-        provider.stop()
-
         store = DataStore()
-        hit = store.get_layer_prefix_hit_rate(NODE_ID, short_ids, Layer.GPU)
+        _inject_long_prompt(store)
 
-        if hit == 0.0:
-            pytest.skip(
-                f"Short prompt has {len(short_ids)} tokens — fewer than block_size "
-                f"or no full block formed; cannot assert prefix hit rate"
-            )
+        short_chain = _hash_chain(SHORT_IDS)
+        assert len(short_chain) < len(_hash_chain(LONG_IDS)), (
+            f"Short prompt should have fewer blocks, got short={len(short_chain)}"
+        )
+        hit = store.get_layer_prefix_hit_rate(NODE_ID, short_chain, Layer.GPU)
 
         assert hit == 1.0, f"Expected hit_rate=1.0 for prefix match, got {hit}"
 
-    def test_prefix_hit_rate_returns_node_id_key(self, vllm_kv_service):
+    def test_prefix_hit_rate_with_full_match(self):
         """
-        Feature: get_layer_prefix_hit_rate returns dict with node_id as key
+        Feature: get_layer_prefix_hit_rate returns 100% when the whole chain is cached
         Description:
-            1. Send an inference request.
-            2. Call get_layer_prefix_hit_rate with the prompt's token IDs.
+            1. Inject KV cache blocks for a long prompt.
+            2. Call get_layer_prefix_hit_rate with the prompt's full hash chain.
         Expectation:
-            Keys are node IDs in "host:port" format matching NODE_ID.
-            Values are integers in [0, 100].
+            All cached blocks are hit -> hit_rate = 1.0.
         """
-        prompt = "Explain the concept of neural networks in simple terms"
-        prompt_ids = _get_token_ids(vllm_kv_service, VLLM_MODEL, prompt)
-        assert len(prompt_ids) > 0, "Should have token IDs for the prompt"
-
-        provider = _make_provider(vllm_kv_service)
-        provider.start()
-        time.sleep(5.0)
-        send_inference_request(vllm_kv_service, VLLM_MODEL, prompt)
-        time.sleep(8.0)
-        provider.stop()
-
         store = DataStore()
-        hit = store.get_layer_prefix_hit_rate(NODE_ID, prompt_ids, Layer.GPU)
+        _inject_long_prompt(store)
+
+        long_chain = _hash_chain(LONG_IDS)
+        assert len(long_chain) == 2, f"Expected 2 full blocks, got {len(long_chain)}"
+        hit = store.get_layer_prefix_hit_rate(NODE_ID, long_chain, Layer.GPU)
 
         assert 0.0 <= hit <= 1.0, f"Hit rate should be in [0.0, 1.0], got {hit}"
+        assert hit == 1.0, f"Expected hit_rate=1.0 for fully cached chain, got {hit}"

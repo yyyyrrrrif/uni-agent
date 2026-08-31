@@ -1,0 +1,13 @@
+# specify the default router configs
+defaults:
+
+  # strategies config
+  - agent_aware_router
+
+  # load the default config, then apply the fields in the current yaml
+  - _self_
+
+# Collector connection-type tuning (HTTP polling + ZMQ long-connection).
+collector:
+  http_polling:
+    http_timeout: 10

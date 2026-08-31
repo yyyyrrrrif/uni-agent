@@ -54,16 +54,14 @@ class KVCAwareBalancer:
             raise ValueError("servers must be non-empty")
         self._config = KVCAwareConfig.from_config(config)
         logger.info(f"KVCAwareBalancer, config={self._config}")
-        self._strategies: list[tuple[Any, float]] = [
-            (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight) for cfg in self._config.strategies
-        ]
+        primary_cfg = self._config.strategies[0]
+        self._strategy = StrategyRegistry.get(type(primary_cfg)).from_config(primary_cfg)
         self._strategy_summary = self._build_strategy_summary(self._config.strategies)
         self._servers: dict[str, Any] = dict(servers)
         max_num_seqs = self._resolve_max_num_seqs()
         max_num_batched_tokens = self._resolve_max_num_batched_tokens()
-        for strategy, _ in self._strategies:
-            if hasattr(strategy, "set_capacity"):
-                strategy.set_capacity(max_num_seqs, max_num_batched_tokens)
+        if hasattr(self._strategy, "set_capacity"):
+            self._strategy.set_capacity(max_num_seqs, max_num_batched_tokens)
         logger.info(f"KVCAwareBalancer: max_num_seqs={max_num_seqs}, max_num_batched_tokens={max_num_batched_tokens}")
         self._route_calls = 0
         # route() latency profiling — cumulative stats flushed every _ROUTE_LOG_EVERY calls.
@@ -134,7 +132,7 @@ class KVCAwareBalancer:
         ``get_server_address``; discovery is skipped and collectors fall back
         to configured/default endpoints.
         """
-        collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
+        collection_names = sorted(self._strategy.collection_names)
         server_addresses: dict[str, str] = {}
         kv_event_endpoints: dict[str, list[str]] = {}
         addr_futures = []
@@ -203,7 +201,7 @@ class KVCAwareBalancer:
         return {
             "servers": list(self._servers.keys()),
             "provider": type(self._provider).__name__,
-            "strategies": [{"type": type(s).__name__, "weight": w} for s, w in self._strategies],
+            "strategies": [{"type": type(self._strategy).__name__}],
             "route_calls": self._route_calls,
             "sticky_size": self._store.sticky_status()["size"],
         }
@@ -236,7 +234,7 @@ class KVCAwareBalancer:
         self._route_calls += 1
         t0 = time.perf_counter()
         ranking = route(
-            self._strategies,
+            self._strategy,
             prompt_ids,
             self._store,
             replicas,

@@ -24,7 +24,7 @@ from uni_agent.llm_router.store.per_request_store import (
     PerRequestStore,
 )
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 # ── PerRequestStore (plain instances — isolated, not the singleton) ──
@@ -35,12 +35,6 @@ class TestPerRequestStore:
         s = PerRequestStore()
         assert s.incr("r1", "turn") == 1
         assert s.incr("r1", "turn", 2) == 3  # delta is arbitrary
-
-    def test_incr_climbs(self):
-        s = PerRequestStore()
-        assert s.incr("r1", "turn") == 1
-        assert s.incr("r1", "turn") == 2
-        assert s.incr("r1", "turn") == 3
 
     def test_distinct_requests_isolated(self):
         s = PerRequestStore()

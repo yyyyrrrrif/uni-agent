@@ -42,14 +42,13 @@ class KVCAwareStrategyConfig(StrategyConfig):
     # Master switch for the sticky short-circuit.
     do_shortcut: bool = True
     # Fallback scoring mode used after the sticky short-circuit misses.
-    slow_cut: SlowCut = SlowCut.PREFIX_LOAD_AWARE
+    slow_cut: SlowCut = SlowCut.CAPACITY_TOKEN_AWARE
     # Overload check mode for the sticky short-circuit (independent of slow_cut).
     # ``simple`` = kv_cache_usage_perc > load_threshold; ``blended`` = the
     # original weighted load formula. Default ``blended`` preserves behavior.
-    overload_mode: OverloadMode = OverloadMode.KV_LOAD
+    overload_mode: OverloadMode = OverloadMode.KV_CACHE_USAGE_PERC
 
     def __post_init__(self) -> None:
-        super().__post_init__()
         if not 0 < self.load_threshold < 1:
             raise ConfigError(f"load_threshold must be in (0, 1), got {self.load_threshold}")
         if not isinstance(self.memory_overload_filter, bool):

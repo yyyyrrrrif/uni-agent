@@ -26,11 +26,11 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = [pytest.mark.st, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 vllm = pytest.importorskip("vllm")  # noqa: F841  (http_server import chain needs it)
 
-from uni_agent.llm_router.server.http_server import KvEventsHttpServer
+from uni_agent.llm_router.server.http_server import KvEventsHttpServer  # noqa: E402
 
 
 def _make_server(dp_size: int = 2, server_address: str = "10.0.0.1"):

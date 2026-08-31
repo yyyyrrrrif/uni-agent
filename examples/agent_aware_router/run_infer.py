@@ -26,7 +26,7 @@ the gateway session, bound by the runner, not a flag.
 KV-cache-aware knobs:
 
   --router-config-path  packaged router YAML to override + point router_config_path at
-                        (default pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml)
+                        (default pkg://uni_agent.llm_router.configs/router.yaml)
   --kv-events           vLLM kv-events zmq publisher; the kvcaware collector's load signal
                         (retained-cache occupancy).
   --load-threshold      strategy[0] overrides; each falls back to the packaged YAML value.
@@ -82,7 +82,7 @@ DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
 
 # Default router plugin YAML (FQN-injected). Strategy overrides land on a temp copy.
-DEFAULT_ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
+DEFAULT_ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/router.yaml"
 
 # Ray's default idle-worker reaper (~10 s) kills agent workers between dispatch
 # gaps, ending the job prematurely.
@@ -268,6 +268,13 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
             }
         },
     }
+    if args.simulated_runner_fqn:
+        # Swap the sandbox-backed runner for a test double (canned observations,
+        # no container): the framework treats runners as interchangeable
+        # AgentRunner-protocol callables.
+        task_runner = agent_framework_cfg["agent_runners"]["task"]
+        task_runner["runner_fqn"] = args.simulated_runner_fqn
+        task_runner["runner_kwargs"] = {}
     agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
@@ -500,6 +507,12 @@ def main() -> None:
         "--log-dir",
         default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/uni_agent_logs"),
         help="Root directory for per-session logs and trajectories; use an empty value to disable.",
+    )
+    parser.add_argument(
+        "--simulated-runner-fqn",
+        default=None,
+        help="Swap the sandbox-backed task runner for an AgentRunner-protocol test double "
+        "(e.g. the e2e simulated sandbox); no container is started.",
     )
 
     # ---- KV-cache-aware router ----

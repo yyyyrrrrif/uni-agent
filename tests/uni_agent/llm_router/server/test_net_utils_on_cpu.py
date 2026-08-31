@@ -20,7 +20,7 @@ import pytest
 
 from uni_agent.llm_router.server.net_utils import get_free_port_range
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 def _bind(addr: str, port: int, reuse: bool = False) -> socket.socket:

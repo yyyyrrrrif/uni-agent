@@ -29,9 +29,9 @@ import ray
 
 from verl.workers.rollout.router import get_router_handle
 
-ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
+ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/router.yaml"
 
-pytestmark = [pytest.mark.st, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 @ray.remote
@@ -130,7 +130,7 @@ class TestKVCAwareEndToEnd:
         handle = get_router_handle(_mk("s0", "s1"), router_config_path=ROUTER_CONFIG_PATH)
         status = ray.get(handle.get_status.remote())
         assert status["provider"] == "CollectorManager"
-        assert status["strategies"] == [{"type": "KVCacheAwareStrategy", "weight": 1.0}]
+        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]
         assert set(status["servers"]) == {"s0", "s1"}
         assert status["route_calls"] == 0
         ray.get(handle.acquire_server.remote("r1", [1, 2, 3]))

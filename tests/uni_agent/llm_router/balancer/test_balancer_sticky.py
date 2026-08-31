@@ -14,7 +14,7 @@
 
 """Sticky-session end-to-end with the REAL sticky_stat collector (no mocking).
 
-``_router_config`` lists ``sticky_stat`` in ``collector_names``, so the patched
+``KVCacheAwareStrategy.COLLECTOR_NAMES`` lists ``sticky_stat``, so the patched
 ``_FakeCollectorManager`` builds a real ``Collector(CallbackTransport(self),
 StickyDecoder)`` that registers ``on_acquire`` / ``on_servers_removed`` on the
 Balancer — exactly the production path. The test does NOT register callbacks by
@@ -34,7 +34,7 @@ from ._helpers import (
     _router_config,
 )
 
-pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
@@ -66,9 +66,8 @@ class TestStickyEndToEnd:
         """Build a balancer and seed its real DataStore with per-replica metrics."""
         balancer = KVCAwareBalancer(servers, _router_config())
         # capacity=64 matches the overload scenario (running=64 → load=1.0).
-        for strategy, _ in balancer._strategies:
-            if hasattr(strategy, "set_capacity"):
-                strategy.set_capacity(64, 1024)
+        if hasattr(balancer._strategy, "set_capacity"):
+            balancer._strategy.set_capacity(64, 1024)
         balancer._store.refresh_metrics(metrics)
         return balancer
 

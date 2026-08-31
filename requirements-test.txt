@@ -5,3 +5,5 @@ fastapi
 uvicorn
 cachetools
 vllm==0.23.0
+ray
+loguru

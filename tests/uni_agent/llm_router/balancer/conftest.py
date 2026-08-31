@@ -24,13 +24,15 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture(autouse=True, scope="session")
+@pytest.fixture(autouse=True, scope="function")
 def _conditional_patch(request):
-    """Patch CollectorManager + _init_provider — only if balancer ut tests run."""
-    has_balancer_ut = any(
-        "balancer" in str(item.fspath) and item.get_closest_marker("ut") for item in request.session.items
+    """Patch CollectorManager + _init_provider for balancer level0 unit tests."""
+    is_balancer_level0_unit = (
+        "balancer" in str(request.fspath)
+        and "ray_integration" not in str(request.fspath)
+        and request.node.get_closest_marker("level0") is not None
     )
-    if not has_balancer_ut:
+    if not is_balancer_level0_unit:
         yield
         return
 
