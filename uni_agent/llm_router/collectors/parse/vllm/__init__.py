@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vLLM backend decoders."""
+"""vLLM backend parsers."""
 
-from .kv import VLLMKVDecoder
-from .metrics import VLLMMetricsDecoder
+from .kv import VLLMKVParser
+from .metrics import VLLMMetricsParser
 
-__all__ = ["VLLMKVDecoder", "VLLMMetricsDecoder"]
+__all__ = ["VLLMKVParser", "VLLMMetricsParser"]

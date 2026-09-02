@@ -16,7 +16,7 @@
 
 ``KVCacheAwareStrategy.COLLECTOR_NAMES`` lists ``sticky_stat``, so the patched
 ``_FakeCollectorManager`` builds a real ``Collector(CallbackTransport(self),
-StickyDecoder)`` that registers ``on_acquire`` / ``on_servers_removed`` on the
+StickyParser)`` that registers ``on_acquire`` / ``on_servers_removed`` on the
 Balancer — exactly the production path. The test does NOT register callbacks by
 hand; it only injects metrics into the real ``DataStore`` and asserts routing
 behaviour. This is the test that proves the Phase-1 statistic chain works

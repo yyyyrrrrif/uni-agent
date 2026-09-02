@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""VLLMKVDecoder — vLLM KV-cache event decoder.
+"""VLLMKVParser — vLLM KV-cache event parser.
 
-Decodes msgpack payloads from ZMQ and returns structured update commands.
+Parses msgpack payloads from ZMQ and returns structured update commands.
 Store writes are handled by Collector via DataStore.
 """
 
@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import msgpack
 
-from ....collectors.decoder import Decoder, KVCacheUpdate
-from ....collectors.decoder.vllm.kv_event import KVCacheEvent
+from ....collectors.parse import KVCacheUpdate, Parser
+from ....collectors.parse.vllm.kv_event import KVCacheEvent
 from ....logging import get_router_logger
 from ....types import Layer
 from ....utils.hash import compute_hash
@@ -31,11 +31,11 @@ from ....utils.hash import compute_hash
 logger = get_router_logger("vllm-kv")
 
 
-class VLLMKVDecoder(Decoder):
-    """vLLM KV-cache decoder — msgpack payload → KVCacheUpdate.
+class VLLMKVParser(Parser):
+    """vLLM KV-cache parser — msgpack payload → KVCacheUpdate.
 
     Each event type has a dedicated handler that folds its blocks into a single
-    ``KVCacheUpdate`` accumulator; ``decode`` is pure dispatch.
+    ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
 
     Attributes:
         remote_to_local_block_hash: Mapping from vLLM remote block_hash
@@ -52,8 +52,8 @@ class VLLMKVDecoder(Decoder):
         self.remote_to_local_block_hash: dict[str, str] = {}
         self._block_size: int | None = None
 
-    def decode(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
-        """Decode msgpack payload and return structured update command.
+    def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
+        """Parse msgpack payload and return structured update command.
 
         Handles both single event (real-time) and multiple events (replay):
           - Single: [timestamp, [[tag, fields...], ...]]
@@ -64,10 +64,10 @@ class VLLMKVDecoder(Decoder):
             node_id: The endpoint that sent this payload.
 
         Returns:
-            KVCacheUpdate with operations to apply, or None if decode failed.
+            KVCacheUpdate with operations to apply, or None if parsing failed.
         """
         if isinstance(raw_data, str):
-            logger.debug("VLLMKVDecoder received string data, expected bytes — skipping")
+            logger.debug("VLLMKVParser received string data, expected bytes — skipping")
             return None
 
         try:
@@ -95,7 +95,7 @@ class VLLMKVDecoder(Decoder):
         except (msgpack.UnpackException, ValueError, TypeError) as exc:
             preview = bytes(raw_data[:32]).hex() if isinstance(raw_data, bytes | bytearray) else str(raw_data)[:64]
             logger.warning(
-                f"Failed to decode msgpack payload from node {node_id}: {exc!r} (len={len(raw_data)}, head={preview})"
+                f"Failed to parse msgpack payload from node {node_id}: {exc!r} (len={len(raw_data)}, head={preview})"
             )
             return None
 

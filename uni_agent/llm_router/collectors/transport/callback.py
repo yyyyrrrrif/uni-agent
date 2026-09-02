@@ -48,7 +48,7 @@ class StatisticEvent:
             ``"on_servers_removed"``.
         request_id: The routing request id (set on ``on_acquire`` and ``on_release``).
         replica_id: The chosen replica (``on_acquire``) or the released server
-            (``on_release``) — unified under one field so one decoder can treat
+            (``on_release``) — unified under one field so one parser can treat
             both as "the replica this event is about".
         server_ids: Removed server ids (``on_servers_removed``).
         prompt_len: Input prompt length (``len(prompt_ids)``; 0 when no prompt
@@ -87,7 +87,7 @@ class CallbackTransport(Transport):
 
         Each callback packs its arguments into a ``StatisticEvent`` and hands
         it to ``handler`` with an empty ``node_id`` (the event carries its own
-        ids; the sticky/inflight decoders ignore ``node_id``).
+        ids; the sticky/inflight parsers ignore ``node_id``).
         """
         balancer = self._balancer
 

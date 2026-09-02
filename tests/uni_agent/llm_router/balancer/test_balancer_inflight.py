@@ -16,7 +16,7 @@
 
 ``KVCacheAwareStrategy.COLLECTOR_NAMES`` lists ``inflight_stat``, so the patched
 ``_FakeCollectorManager`` builds a real ``Collector(CallbackTransport(self),
-InflightDecoder)`` that registers ``on_acquire`` / ``on_release`` on the
+InflightParser)`` that registers ``on_acquire`` / ``on_release`` on the
 Balancer. acquire bumps the chosen replica's INFLIGHT_COUNT (+1, mirroring verl
 ``GlobalRequestLoadBalancer._inflight_requests``) and DISPATCHED_COUNT, and
 records the per-request turn (``PerRequestStore``) added to the receiving

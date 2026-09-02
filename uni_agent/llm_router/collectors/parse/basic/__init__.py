@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Basic decoders."""
+"""Basic parsers."""
 
-from .inflight import InflightDecoder
-from .sticky import StickyDecoder
+from .inflight import InflightParser
+from .sticky import StickyParser
 
-__all__ = ["InflightDecoder", "StickyDecoder"]
+__all__ = ["InflightParser", "StickyParser"]

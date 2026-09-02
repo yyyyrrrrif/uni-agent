@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""StickyDecoder — Balancer callback → StickyUpdate (per-request LRU writes).
+"""StickyParser — Balancer callback → StickyUpdate (per-request LRU writes).
 
 Fed by ``CallbackTransport``, which packs each Balancer callback into a
-``StatisticEvent``. The decoder is stateless — it dispatches on the event
+``StatisticEvent``. The parser is stateless — it dispatches on the event
 type and emits a ``StickyUpdate``; the ``Collector`` applies it to the
 per-request store via ``DataStore``.
 
@@ -28,17 +28,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from ....collectors.decoder import Decoder, StickyUpdate
+from ....collectors.parse import Parser, StickyUpdate
 from ....collectors.transport.callback import StatisticEvent
 from ....logging import get_router_logger
 
-logger = get_router_logger("sticky-decoder")
+logger = get_router_logger("sticky-parser")
 
 
-class StickyDecoder(Decoder):
-    """Decode ``StatisticEvent`` → ``StickyUpdate`` for sticky bindings."""
+class StickyParser(Parser):
+    """Parse ``StatisticEvent`` → ``StickyUpdate`` for sticky bindings."""
 
-    def decode(self, raw_data: bytes | str | Any, node_id: str) -> StickyUpdate | None:
+    def parse(self, raw_data: bytes | str | Any, node_id: str) -> StickyUpdate | None:
         """Dispatch on the event type; ignore non-event payloads."""
         if not isinstance(raw_data, StatisticEvent):
             return None

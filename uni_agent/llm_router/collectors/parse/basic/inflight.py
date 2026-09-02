@@ -12,26 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""InflightDecoder — Balancer callback → MetricsUpdate deltas (inflight ±1).
+"""InflightParser — Balancer callback → MetricsUpdate deltas (inflight ±1).
 
 Also dispatch/complete counts, dispatch turn, and dispatched prompt length.
 
 Mirrors verl ``GlobalRequestLoadBalancer._inflight_requests``: acquire bumps
 the chosen replica's in-flight count by +1, release decrements it by -1. The
-decoder is stateless — it emits only signed deltas; the store's ``incr`` owns
+parser is stateless — it emits only signed deltas; the store's ``incr`` owns
 the running counters.
 
 Beyond the running inflight gauge, acquire/release also bump the per-replica
 cumulative DISPATCHED_COUNT / COMPLETED_COUNT counters — the monotonic
 siblings of the gauge that carry dispatch / completion volume per replica.
 Summed across replicas they give the global dispatched/completed totals; their
-ratio is the realized-throughput share. On acquire the decoder also forwards
+ratio is the realized-throughput share. On acquire the parser also forwards
 ``request_id``: the collector uses it to bump the per-request turn counter
 (``PerRequestStore``) and add that turn to the receiving replica's in-flight
 turn sum (``INFLIGHT_TURN_SUM``); release forwards ``request_id`` too so the
 same turn is subtracted, keeping the sum balanced — the per-replica view and
 the turn-weighted view share the inflight collector's home (one callback
-subscription, one decode pass). On
+subscription, one parse pass). On
 acquire the request's input prompt length (``event.prompt_len``) is also
 forwarded as a ``PROMPT_LEN_SUM`` delta — the per-replica cumulative
 request-size signal the plot derives an average dispatched prompt length from.
@@ -61,15 +61,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from ....collectors.decoder import Decoder, MetricsUpdate
+from ....collectors.parse import MetricsUpdate, Parser
 from ....collectors.transport.callback import StatisticEvent
 from ....types import MetricKey
 
 
-class InflightDecoder(Decoder):
-    """Decode ``StatisticEvent`` → inflight + dispatch/complete ``MetricsUpdate`` deltas."""
+class InflightParser(Parser):
+    """Parse ``StatisticEvent`` → inflight + dispatch/complete ``MetricsUpdate`` deltas."""
 
-    def decode(self, raw_data: bytes | str | Any, node_id: str) -> MetricsUpdate | None:
+    def parse(self, raw_data: bytes | str | Any, node_id: str) -> MetricsUpdate | None:
         """Dispatch on acquire/release; ignore other events / non-event payloads."""
         if not isinstance(raw_data, StatisticEvent):
             return None

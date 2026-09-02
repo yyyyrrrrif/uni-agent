@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Decoder base types — imported by ``collector.py``."""
+"""Parser base types — imported by ``collector.py``."""
 
-from .base import Decoder, KVCacheUpdate, MetricsUpdate, StickyUpdate
+from .base import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 
-__all__ = ["Decoder", "KVCacheUpdate", "MetricsUpdate", "StickyUpdate"]
+__all__ = ["Parser", "KVCacheUpdate", "MetricsUpdate", "StickyUpdate"]

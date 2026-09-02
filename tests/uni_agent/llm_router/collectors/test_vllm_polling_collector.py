@@ -16,7 +16,7 @@
 
 Test flow:
 1. Feed pre-canned Prometheus metrics text via FakeHTTPTransport.
-2. Create a Collector(FakeHTTPTransport, VLLMMetricsDecoder).
+2. Create a Collector(FakeHTTPTransport, VLLMMetricsParser).
 3. Call start() to begin metrics polling; the collector writes to the store.
 4. Verify that expected metrics exist via DataStore.
 
@@ -31,7 +31,7 @@ import pytest
 from conftest import NODE_ID, VLLM_METRICS_TEXT, FakeHTTPTransport
 
 from uni_agent.llm_router.collectors.collector import Collector
-from uni_agent.llm_router.collectors.decoder.vllm.metrics import VLLMMetricsDecoder
+from uni_agent.llm_router.collectors.parse.vllm.metrics import VLLMMetricsParser
 from uni_agent.llm_router.store.data_store import DataStore
 from uni_agent.llm_router.types import MetricKey
 
@@ -41,7 +41,7 @@ POLL_WAIT = 0.3
 
 
 def _make_collector():
-    return Collector(FakeHTTPTransport(VLLM_METRICS_TEXT, interval=0.05), VLLMMetricsDecoder())
+    return Collector(FakeHTTPTransport(VLLM_METRICS_TEXT, interval=0.05), VLLMMetricsParser())
 
 
 def _collect() -> DataStore:

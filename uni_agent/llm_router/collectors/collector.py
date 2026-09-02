@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Collector — unified collector interface combining Transport + Decoder."""
+"""Collector — unified collector interface combining Transport + Parser."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from ..insight import WriteEvent, WriteKind, emitter
 from ..logging import get_router_logger
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
-from .decoder import Decoder, KVCacheUpdate, MetricsUpdate, StickyUpdate
+from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .transport.base import Transport
 
 logger = get_router_logger("collector")
@@ -78,27 +78,27 @@ _KV_EVENT_LOG_EVERY = 500
 
 
 class Collector:
-    """Unified collector — composes Transport + Decoder.
+    """Unified collector — composes Transport + Parser.
 
     Args:
         transport: Transport instance (ZMQ, HTTP, etc.)
-        decoder: Decoder instance (vLLM KV, vLLM Metrics, etc.)
+        parser: Parser instance (vLLM KV, vLLM Metrics, etc.)
     """
 
-    def __init__(self, transport: Transport, decoder: Decoder) -> None:
+    def __init__(self, transport: Transport, parser: Parser) -> None:
         self._transport = transport
-        self._decoder = decoder
+        self._parser = parser
         self._data_store = DataStore()
         self._future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
-        # Periodic evidence-log state. The decoder is stateless (returns
+        # Periodic evidence-log state. The parser is stateless (returns
         # MetricsUpdate; merged here), so the log reads a current snapshot.
         self._metrics_poll_count = 0
         # Previous cumulative snapshot per node — for windowed delta
         # computation. {node_id: {canonical_key: value}}
         self._metrics_prev: dict[str, dict[str, float]] = {}
-        # kv-event tallies for periodic summary logging (kv decoder only).
+        # kv-event tallies for periodic summary logging (kv parser only).
         self._kv_event_counts: dict[str, int] = defaultdict(int)
         self._kv_block_counts: dict[str, int] = defaultdict(int)
         self._kv_last_logged_total = 0
@@ -115,8 +115,8 @@ class Collector:
             self._loop.run_forever()
 
         def handler(raw_data: bytes | str, node_id: str) -> None:
-            """Handler: decode and dispatch to the right store write path."""
-            result = self._decoder.decode(raw_data, node_id)
+            """Handler: parse and dispatch to the right store write path."""
+            result = self._parser.parse(raw_data, node_id)
             if isinstance(result, KVCacheUpdate):
                 self._write_kv_update(result)
             elif isinstance(result, MetricsUpdate):
@@ -124,9 +124,9 @@ class Collector:
             elif isinstance(result, StickyUpdate):
                 self._write_sticky_update(result)
             else:
-                # None is normal for statistic decoders that skip an event
-                # (e.g. StickyDecoder on_release); demote to debug to avoid per-turn noise.
-                logger.debug(f"decoder.decode returned no update: {result}")
+                # None is normal for statistic parsers that skip an event
+                # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
+                logger.debug(f"parser.parse returned no update: {result}")
 
         if getattr(self._transport, "is_async", True):
             self._loop_thread = threading.Thread(
@@ -203,7 +203,7 @@ class Collector:
         it to the emitter (the 14 B-class signals).
         """
         if update.is_delta:
-            # Batch the decoder's signed deltas in one locked PerReplica write.
+            # Batch the parser's signed deltas in one locked PerReplica write.
             # Turn lives in PerRequestStore (separate lock); look it up first so
             # it joins this batch (no second PerReplica lock cycle). Turn fires
             # only on dispatch/release.
@@ -408,7 +408,7 @@ def get_collector(
         ValueError: If ``name`` is unknown.
     """
     if name == "vllm_metrics":
-        from .decoder.vllm.metrics import VLLMMetricsDecoder
+        from .parse.vllm.metrics import VLLMMetricsParser
         from .transport.http import HTTPTransport
 
         hp = collectors_config.http_polling
@@ -417,10 +417,10 @@ def get_collector(
             interval=hp["polling_interval"],
             http_timeout=hp["http_timeout"],
         )
-        return Collector(transport, VLLMMetricsDecoder())
+        return Collector(transport, VLLMMetricsParser())
 
     if name == "vllm_zmq":
-        from .decoder.vllm.kv import VLLMKVDecoder
+        from .parse.vllm.kv import VLLMKVParser
         from .transport.zmq import ZMQTransport
 
         lc = collectors_config.long_connection
@@ -431,19 +431,19 @@ def get_collector(
             max_retry_attempts=lc["max_retry_attempts"],
             retry_backoff_factor=lc["retry_backoff_factor"],
         )
-        return Collector(transport, VLLMKVDecoder())
+        return Collector(transport, VLLMKVParser())
 
     if name == "sticky_stat":
-        from .decoder.basic.sticky import StickyDecoder
+        from .parse.basic.sticky import StickyParser
         from .transport.callback import CallbackTransport
 
-        return Collector(CallbackTransport(balancer_handler), StickyDecoder())
+        return Collector(CallbackTransport(balancer_handler), StickyParser())
 
     if name == "inflight_stat":
-        from .decoder.basic.inflight import InflightDecoder
+        from .parse.basic.inflight import InflightParser
         from .transport.callback import CallbackTransport
 
-        return Collector(CallbackTransport(balancer_handler), InflightDecoder())
+        return Collector(CallbackTransport(balancer_handler), InflightParser())
 
     raise ValueError(
         f"Unknown collector: '{name}'. Available: ['vllm_metrics', 'vllm_zmq', 'sticky_stat', 'inflight_stat']"

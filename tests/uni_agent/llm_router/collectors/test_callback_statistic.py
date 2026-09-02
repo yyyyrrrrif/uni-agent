@@ -15,8 +15,8 @@
 """Tests for the Balancer-callback statistic path.
 
 Covers the Phase-1 components that turn Balancer callbacks into store writes:
-``StatisticEvent`` (pack contract), ``StickyDecoder`` / ``InflightDecoder``
-(decoders), and ``CallbackTransport`` (the pure-forwarder transport that
+``StatisticEvent`` (pack contract), ``StickyParser`` / ``InflightParser``
+(parsers), and ``CallbackTransport`` (the pure-forwarder transport that
 registers on the Balancer). Together these mirror what the network collectors
 do, but driven by the Balancer's own request-path hooks.
 """
@@ -27,9 +27,9 @@ import asyncio
 
 import pytest
 
-from uni_agent.llm_router.collectors.decoder import MetricsUpdate, StickyUpdate
-from uni_agent.llm_router.collectors.decoder.basic.inflight import InflightDecoder
-from uni_agent.llm_router.collectors.decoder.basic.sticky import StickyDecoder
+from uni_agent.llm_router.collectors.parse import MetricsUpdate, StickyUpdate
+from uni_agent.llm_router.collectors.parse.basic.inflight import InflightParser
+from uni_agent.llm_router.collectors.parse.basic.sticky import StickyParser
 from uni_agent.llm_router.collectors.transport.callback import (
     CallbackTransport,
     StatisticEvent,
@@ -52,33 +52,31 @@ class TestStatisticEvent:
             ev.event = "x"  # type: ignore[misc]
 
 
-class TestStickyDecoder:
+class TestStickyParser:
     def test_on_acquire_emits_put(self):
-        upd = StickyDecoder().decode(StatisticEvent("on_acquire", request_id="r1", replica_id="s0"), "")
+        upd = StickyParser().parse(StatisticEvent("on_acquire", request_id="r1", replica_id="s0"), "")
         assert isinstance(upd, StickyUpdate)
         assert upd.action == "put"
         assert upd.request_id == "r1"
         assert upd.replica_id == "s0"
 
     def test_on_servers_removed_emits_invalidate_replica(self):
-        upd = StickyDecoder().decode(StatisticEvent("on_servers_removed", server_ids=["s0", "s1"]), "")
+        upd = StickyParser().parse(StatisticEvent("on_servers_removed", server_ids=["s0", "s1"]), "")
         assert isinstance(upd, StickyUpdate)
         assert upd.action == "invalidate_replica"
         assert upd.replica_ids == ("s0", "s1")
 
     def test_return_is_none(self):
-        d = StickyDecoder()
-        assert d.decode(b"bytes", "") is None
-        assert d.decode("str", "") is None
-        assert d.decode(StatisticEvent("on_acquire"), "") is None
-        assert d.decode(StatisticEvent("on_release", replica_id="s0"), "") is None
+        d = StickyParser()
+        assert d.parse(b"bytes", "") is None
+        assert d.parse("str", "") is None
+        assert d.parse(StatisticEvent("on_acquire"), "") is None
+        assert d.parse(StatisticEvent("on_release", replica_id="s0"), "") is None
 
 
-class TestInflightDecoder:
+class TestInflightParser:
     def test_on_acquire_emits_inflight_plus_dispatched_delta(self):
-        upd = InflightDecoder().decode(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=42), ""
-        )
+        upd = InflightParser().parse(StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=42), "")
         assert isinstance(upd, MetricsUpdate)
         assert upd.node_id == "s0"
         assert upd.metrics == {
@@ -91,9 +89,7 @@ class TestInflightDecoder:
         assert upd.request_id == "r1"  # carried so the collector attributes the dispatch's turn
 
     def test_on_release_emits_inflight_minus_completed_delta(self):
-        upd = InflightDecoder().decode(
-            StatisticEvent("on_release", replica_id="s0", prompt_len=42, request_id="r1"), ""
-        )
+        upd = InflightParser().parse(StatisticEvent("on_release", replica_id="s0", prompt_len=42, request_id="r1"), "")
         assert isinstance(upd, MetricsUpdate)
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: -1,
@@ -104,9 +100,9 @@ class TestInflightDecoder:
         assert upd.request_id == "r1"  # carried so the collector can attribute the release
 
     def test_returns_none(self):
-        assert InflightDecoder().decode(b"bytes", "") is None
-        assert InflightDecoder().decode(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
-        assert InflightDecoder().decode(StatisticEvent("on_acquire"), "") is None
+        assert InflightParser().parse(b"bytes", "") is None
+        assert InflightParser().parse(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
+        assert InflightParser().parse(StatisticEvent("on_acquire"), "") is None
 
 
 class _FakeBalancer:
@@ -183,7 +179,7 @@ class TestCallbackTransport:
 
 
 class TestCollectorCallbackIntegration:
-    """End-to-end: Collector(CallbackTransport, decoder) → handler → DataStore.
+    """End-to-end: Collector(CallbackTransport, parser) → handler → DataStore.
 
     Exercises the is_async=False start path (tmp loop runs the loop-free
     subscribe), the handler's StickyUpdate/MetricsUpdate dispatch, and the
@@ -206,7 +202,7 @@ class TestCollectorCallbackIntegration:
         from uni_agent.llm_router.store.data_store import DataStore
 
         balancer = _FakeBalancer()
-        collector = Collector(CallbackTransport(balancer), StickyDecoder())
+        collector = Collector(CallbackTransport(balancer), StickyParser())
         collector.start()
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0")
@@ -215,7 +211,7 @@ class TestCollectorCallbackIntegration:
             collector.stop()
 
     def test_inflight_collector_applies_acquire_release_delta_and_prompt_len(self):
-        """Feature: InflightDecoder on_acquire/on_release drive inflight/token/dispatched/completed
+        """Feature: InflightParser on_acquire/on_release drive inflight/token/dispatched/completed
           deltas and accumulate PROMPT_LEN_SUM from the prompt_ids length.
         Description: two acquires (r1 len-3, r2 len-10) to s0, one release (-3 tokens), and an
           acquire to s1 with no prompt — exercising both the delta metrics and prompt-len sum.
@@ -227,7 +223,7 @@ class TestCollectorCallbackIntegration:
         from uni_agent.llm_router.store.data_store import DataStore
 
         balancer = _FakeBalancer()
-        collector = Collector(CallbackTransport(balancer), InflightDecoder())
+        collector = Collector(CallbackTransport(balancer), InflightParser())
         collector.start()
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # +1 inflight, +3 tokens, len 3
@@ -251,7 +247,7 @@ class TestCollectorCallbackIntegration:
         from uni_agent.llm_router.store.data_store import DataStore
 
         balancer = _FakeBalancer()
-        collector = Collector(CallbackTransport(balancer), InflightDecoder())
+        collector = Collector(CallbackTransport(balancer), InflightParser())
         collector.start()
         try:
             # r1 dispatched three times (turns 1,2,3) to s0,s1,s0; r2 once (turn 1)
@@ -284,10 +280,10 @@ class TestCollectorCallbackIntegration:
         guards against a future request_id-carrying update overloading the turn path.
         """
         from uni_agent.llm_router.collectors.collector import Collector
-        from uni_agent.llm_router.collectors.decoder import MetricsUpdate
+        from uni_agent.llm_router.collectors.parse import MetricsUpdate
         from uni_agent.llm_router.store.data_store import DataStore
 
-        collector = Collector(CallbackTransport(_FakeBalancer()), InflightDecoder())
+        collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
         # request_id present, but no DISPATCHED_COUNT in the delta → not a dispatch.
         collector._write_metrics_update(
             MetricsUpdate(
@@ -324,7 +320,7 @@ class _RecordingRLInsight:
 class TestCollectorEmitsToInsight:
     """B-class end-to-end: with rl-insight emit ON, collector writes forward to rl_insight.
 
-    Drives the real ``Collector(CallbackTransport, InflightDecoder)`` through
+    Drives the real ``Collector(CallbackTransport, InflightParser)`` through
     acquire/release and feeds poll/kv updates directly, asserting the recording
     rl_insight double receives exactly the B-class primitives the emitter maps.
     """
@@ -354,7 +350,7 @@ class TestCollectorEmitsToInsight:
         from uni_agent.llm_router.collectors.collector import Collector
 
         balancer = _FakeBalancer()
-        collector = Collector(CallbackTransport(balancer), InflightDecoder())
+        collector = Collector(CallbackTransport(balancer), InflightParser())
         collector.start()
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # plen 3, turn 1
@@ -372,7 +368,7 @@ class TestCollectorEmitsToInsight:
         from uni_agent.llm_router.collectors.collector import Collector
 
         balancer = _FakeBalancer()
-        collector = Collector(CallbackTransport(balancer), InflightDecoder())
+        collector = Collector(CallbackTransport(balancer), InflightParser())
         collector.start()
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", [1, 2, 3])  # plen 3, turn 1
@@ -388,9 +384,9 @@ class TestCollectorEmitsToInsight:
 
     def test_poll_forwards_levels_cumulatives_and_load(self):
         from uni_agent.llm_router.collectors.collector import Collector
-        from uni_agent.llm_router.collectors.decoder import MetricsUpdate
+        from uni_agent.llm_router.collectors.parse import MetricsUpdate
 
-        collector = Collector(CallbackTransport(_FakeBalancer()), InflightDecoder())
+        collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
         collector._write_metrics_update(
             MetricsUpdate(
                 node_id="s0",
@@ -424,10 +420,10 @@ class TestCollectorEmitsToInsight:
 
     def test_kv_removed_forwards_evictions(self):
         from uni_agent.llm_router.collectors.collector import Collector
-        from uni_agent.llm_router.collectors.decoder import KVCacheUpdate
+        from uni_agent.llm_router.collectors.parse import KVCacheUpdate
         from uni_agent.llm_router.types import Layer
 
-        collector = Collector(CallbackTransport(_FakeBalancer()), InflightDecoder())
+        collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
         collector._write_kv_update(KVCacheUpdate(node_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
 
         assert self._rl.calls == [("counter", "kv_evictions", 3, {"replica": "s0"})]

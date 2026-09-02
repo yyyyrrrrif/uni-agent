@@ -15,7 +15,7 @@
 """Tests for DataStore.get_layer_prefix_hit_rate via injected KV events.
 
 Test flow:
-1. Create Collector(FakeZMQTransport, VLLMKVDecoder).
+1. Create Collector(FakeZMQTransport, VLLMKVParser).
 2. Call start() to begin event processing.
 3. Inject ChainBlocks of a "long" prompt through the fake transport.
 4. Compute the prefix-hash chains of the long and short prompts locally.
@@ -33,7 +33,7 @@ import pytest
 from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event
 
 from uni_agent.llm_router.collectors.collector import Collector
-from uni_agent.llm_router.collectors.decoder.vllm.kv import VLLMKVDecoder
+from uni_agent.llm_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.llm_router.store.data_store import DataStore
 from uni_agent.llm_router.types import Layer
 from uni_agent.llm_router.utils.hash import get_prefix_hashes_incremental
@@ -48,14 +48,14 @@ SHORT_IDS = LONG_IDS[:BLOCK_SIZE]
 
 
 def _make_collector(payloads):
-    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVDecoder())
+    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser())
 
 
 def _inject_long_prompt(store: DataStore):
     """Inject chained BlockStored events for the long prompt into the KV store.
 
     The two blocks share a chain: block 1's parent is block 0's remote hash,
-    so the decoder computes local hashes identical to
+    so the parser computes local hashes identical to
     ``get_prefix_hashes_incremental`` on the same token IDs.
     """
     collector = _make_collector(

@@ -14,7 +14,7 @@
 
 """Tests for PerReplicaStore.incr and DataStore sticky-session delegation.
 
-Covers incremental writes (inflight ±1, keeping the decoder stateless) and the
+Covers incremental writes (inflight ±1, keeping the parser stateless) and the
 DataStore facade storing sticky bindings in PerRequestStore.
 """
 

@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Decoder abstract base and its update return types.
+"""Parser abstract base and its update return types.
 
-A ``Decoder`` turns a raw transport payload (bytes/str) into a structured
+A ``Parser`` turns a raw transport payload (bytes/str) into a structured
 update that the ``Collector`` applies to the store.  The update types
 (``KVCacheUpdate``, ``MetricsUpdate``) live here, next to the base, because
-they are the decoder's output contract — the layer that both produces and
+they are the parser's output contract — the layer that both produces and
 consumes them.
 """
 
@@ -32,9 +32,9 @@ from ...types import Layer
 
 @dataclass
 class KVCacheUpdate:
-    """Mutable accumulator for KVCacheStore updates, built by the decoder.
+    """Mutable accumulator for KVCacheStore updates, built by the parser.
 
-    The decoder dispatches each event to a handler that calls ``add``/``remove``
+    The parser dispatches each event to a handler that calls ``add``/``remove``
     to fold blocks in; the collector then reads ``add_blocks``/``remove_blocks``
     to write the store.
 
@@ -65,7 +65,7 @@ class KVCacheUpdate:
         self.clear_all = True
 
     def set_block_size(self, size: int) -> None:
-        """Set the learned block size (first BlockStored wins; set by the decoder)."""
+        """Set the learned block size (first BlockStored wins; set by the parser)."""
         self.block_size = size
 
 
@@ -76,10 +76,10 @@ class MetricsUpdate:
     Attributes:
         node_id: Target endpoint identifier.
         metrics: Dict of canonical_key → value.
-        is_delta: When ``False`` (default, ``VLLMMetricsDecoder``) the values
+        is_delta: When ``False`` (default, ``VLLMMetricsParser``) the values
             are absolute gauges applied via ``refresh`` (merge overwrite). When
-            ``True`` (``InflightDecoder``) the values are signed deltas applied
-            via ``incr`` — keeps the decoder stateless (it emits only ±1; the
+            ``True`` (``InflightParser``) the values are signed deltas applied
+            via ``incr`` — keeps the parser stateless (it emits only ±1; the
             store owns the running counter).
         request_id: Optional routing request id carried with the update
             (``None`` when the update isn't request-scoped).
@@ -95,7 +95,7 @@ class MetricsUpdate:
 class StickyUpdate:
     """Structured update command for the per-request store (sticky binding).
 
-    Emitted by ``StickyDecoder`` from the Balancer's ``on_acquire`` /
+    Emitted by ``StickyParser`` from the Balancer's ``on_acquire`` /
     ``on_servers_removed`` callbacks (packed into a ``StatisticEvent`` by
     ``CallbackTransport``). Distinct from ``KVCacheUpdate`` (per-replica
     block) and ``MetricsUpdate`` (per-replica gauge) because sticky is a
@@ -115,26 +115,26 @@ class StickyUpdate:
     replica_ids: tuple[str, ...] = ()
 
 
-class Decoder(ABC):
-    """Abstract base for data decoders.
+class Parser(ABC):
+    """Abstract base for data parsers.
 
-    Subclasses implement ``decode()`` with their backend-specific parsing logic,
+    Subclasses implement ``parse()`` with their backend-specific parsing logic,
     returning a ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``
     (or ``None`` on failure).
     """
 
     @abstractmethod
-    def decode(self, raw_data: bytes | str | Any, node_id: str) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | None:
-        """Decode raw data and return a structured update.
+    def parse(self, raw_data: bytes | str | Any, node_id: str) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | None:
+        """Parse raw data and return a structured update.
 
         Args:
             raw_data: Raw payload — ``bytes`` (from ZMQ) / ``str`` (from HTTP
                 response text) for network transports, or a ``StatisticEvent``
-                for the callback transport (sticky / inflight decoders).
+                for the callback transport (sticky / inflight parsers).
             node_id: Source endpoint identifier (empty string for the callback
                 transport — the event carries its own request/replica ids).
 
         Returns:
             A ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``, or
-            ``None`` if decode fails or the payload type is not handled.
+            ``None`` if parsing fails or the payload type is not handled.
         """

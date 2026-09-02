@@ -210,7 +210,7 @@ class DataStore:
         """Apply a signed delta to one metric for one node (inflight ±1).
 
         Routes to ``PerReplicaStore.incr`` (not ``refresh``) so a stateless delta
-        emitter (``InflightDecoder``) can move a running counter without
+        emitter (``InflightParser``) can move a running counter without
         tracking the absolute value itself.
 
         Returns:
@@ -221,7 +221,7 @@ class DataStore:
     def incr_metrics(self, node_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
         """Apply multiple signed deltas to one node under a single lock.
 
-        Batched variant of :meth:`incr_metric` for the ``on_acquire`` decoder,
+        Batched variant of :meth:`incr_metric` for the ``on_acquire`` parser,
         which emits several deltas per dispatch (INFLIGHT / DISPATCHED /
         PROMPT_LEN_SUM) — batching avoids one lock cycle per key on the hot path.
 

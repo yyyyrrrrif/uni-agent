@@ -15,7 +15,7 @@
 """Cache layer constants — backend-agnostic canonical layer names.
 
 Backend-specific medium strings (e.g. vLLM's ``"GPU"``/``"cpu"``) are mapped to
-these constants at each backend's decoder boundary. Downstream store and
+these constants at each backend's parser boundary. Downstream store and
 strategy layers reference cache layers via these constants — never raw backend
 strings.
 """

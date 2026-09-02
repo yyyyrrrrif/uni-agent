@@ -30,7 +30,7 @@ class _FakeCollectorManager:
     """Stand-in for ``CollectorManager`` — stubs NETWORK collectors but builds
     REAL statistic collectors (anything with ``is_async=False``).
 
-    The Balancer-callback → CallbackTransport → StickyDecoder/InflightDecoder →
+    The Balancer-callback → CallbackTransport → StickyParser/InflightParser →
     DataStore chain is the heart of the Phase-1 refactor, so it must run
     end-to-end (NOT mocked). Network collectors (vllm_metrics / vllm_zmq) need
     live endpoints and are stubbed; tests inject metrics directly via

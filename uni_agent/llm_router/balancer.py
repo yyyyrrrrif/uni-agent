@@ -215,7 +215,7 @@ class KVCAwareBalancer:
         passed at ``acquire_server`` time; ``len(prompt_ids)`` is forwarded as the
         same ``prompt_len`` int that ``on_acquire`` produced, so the in-flight
         token gauge is decremented by exactly what acquire added. ``request_id``
-        lets the inflight decoder attribute the release to the right request (e.g.
+        lets the inflight parser attribute the release to the right request (e.g.
         to subtract its turn from the in-flight turn sum). Both default for
         callers that do not track them (the token gauge simply stays unchanged on
         release).

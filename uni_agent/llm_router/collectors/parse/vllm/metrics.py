@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""VLLMMetricsDecoder — vLLM Prometheus metrics decoder.
+"""VLLMMetricsParser — vLLM Prometheus metrics parser.
 
 Parses Prometheus exposition-format text and returns structured metrics.
 Store writes are handled by Collector via DataStore.
@@ -22,15 +22,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from ....collectors.decoder import Decoder, MetricsUpdate
+from ....collectors.parse import MetricsUpdate, Parser
 from ....logging import get_router_logger
 from ....types import METRIC_SPECS, MetricKey
 
 logger = get_router_logger("vllm-metrics")
 
 
-class VLLMMetricsDecoder(Decoder):
-    """vLLM Prometheus metrics decoder — parses HTTP response text.
+class VLLMMetricsParser(Parser):
+    """vLLM Prometheus metrics parser — parses HTTP response text.
 
     Returns structured metrics.
 
@@ -68,10 +68,10 @@ class VLLMMetricsDecoder(Decoder):
         # label-aware in ``_resolve_canonical`` (cache_hit vs local_compute).
         # cache_config_info is also NOT here — it's an info gauge whose value is
         # 1.0; the real ``num_gpu_blocks`` lives in a label and is extracted
-        # separately in ``decode`` (label-as-value).
+        # separately in ``parse`` (label-as-value).
     }
 
-    def decode(self, raw_data: bytes | str, node_id: str) -> MetricsUpdate | None:
+    def parse(self, raw_data: bytes | str, node_id: str) -> MetricsUpdate | None:
         """Parse Prometheus text and return structured metrics.
 
         Args:
@@ -79,11 +79,11 @@ class VLLMMetricsDecoder(Decoder):
             node_id: Source endpoint identifier.
 
         Returns:
-            MetricsUpdate with parsed metrics, or None if decode failed.
+            MetricsUpdate with parsed metrics, or None if parsing failed.
         """
         # HTTP delivers str; ignore bytes data
         if isinstance(raw_data, bytes):
-            logger.debug("VLLMMetricsDecoder received bytes data, expected str — skipping")
+            logger.debug("VLLMMetricsParser received bytes data, expected str — skipping")
             return None
 
         result: dict[str, Any] = {}
@@ -112,7 +112,7 @@ class VLLMMetricsDecoder(Decoder):
                     labels = {}
                     value_part = parts[-1] if len(parts) > 1 else ""
             except (ValueError, IndexError):
-                logger.warning(f"decode failed: {line}")
+                logger.warning(f"parse failed: {line}")
                 continue
 
             # cache_config_info is an info gauge: its value is 1.0, the real
@@ -153,4 +153,4 @@ class VLLMMetricsDecoder(Decoder):
             if source == "local_compute":
                 return MetricKey.PROMPT_TOKENS
             return None
-        return VLLMMetricsDecoder._PROMETHEUS_MAP.get(raw_name)
+        return VLLMMetricsParser._PROMETHEUS_MAP.get(raw_name)

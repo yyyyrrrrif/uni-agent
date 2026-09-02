@@ -16,8 +16,8 @@
 
 Test flow:
 1. Inject pre-canned msgpack KV events via FakeZMQTransport.
-2. Create a Collector(FakeZMQTransport, VLLMKVDecoder).
-3. Call start() — the collector decodes events and writes to the KV cache store.
+2. Create a Collector(FakeZMQTransport, VLLMKVParser).
+3. Call start() — the collector parses events and writes to the KV cache store.
 4. Verify that KV cache data is accessible via DataStore.
 
 No real vLLM service is required.
@@ -31,7 +31,7 @@ import pytest
 from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event
 
 from uni_agent.llm_router.collectors.collector import Collector
-from uni_agent.llm_router.collectors.decoder.vllm.kv import VLLMKVDecoder
+from uni_agent.llm_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.llm_router.store.data_store import DataStore
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
@@ -40,7 +40,7 @@ WAIT = 0.3
 
 
 def _make_collector(payloads):
-    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVDecoder())
+    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser())
 
 
 def _block_ids(start: int = 0) -> list[int]:
@@ -118,11 +118,11 @@ class TestVLLMKVEventCollector:
             f"NODE_ID '{NODE_ID}' should not appear in any block after clear_kv_node"
         )
 
-    def test_decoder_hash_mapping_populated(self):
+    def test_parser_hash_mapping_populated(self):
         """
-        Feature: VLLMKVDecoder.remote_to_local_block_hash is populated after events
+        Feature: VLLMKVParser.remote_to_local_block_hash is populated after events
         Description:
-            Verify that the decoder's hash mapping tracks remote->local block hashes,
+            Verify that the parser's hash mapping tracks remote->local block hashes,
             and that every local hash appears in the KV cache store.
         Expectation:
             remote_to_local_block_hash is non-empty.
@@ -130,7 +130,7 @@ class TestVLLMKVEventCollector:
         """
         store, collector = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
 
-        mapping = collector._decoder.remote_to_local_block_hash
+        mapping = collector._parser.remote_to_local_block_hash
         assert len(mapping) > 0, "remote_to_local_block_hash should have entries after processing events"
         for remote_bh, local_bh in mapping.items():
             assert isinstance(remote_bh, str)

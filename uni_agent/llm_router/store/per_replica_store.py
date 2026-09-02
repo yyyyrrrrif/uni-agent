@@ -68,7 +68,7 @@ class PerReplicaStore:
 
         Unlike ``refresh`` (batch merge overwrite), this is an incremental
         write: it reads the current value (falling back to the spec default)
-        and stores ``current + delta``. Keeps the writer (decoder) stateless
+        and stores ``current + delta``. Keeps the writer (parser) stateless
         — it only emits the +/-1 delta; the store owns the running counter.
 
         Args:
@@ -91,7 +91,7 @@ class PerReplicaStore:
 
         Same incremental semantics as :meth:`incr` (reads current, adds delta,
         falling back to spec defaults), but takes the lock once for the whole
-        batch — the ``on_acquire`` decoder emits several deltas per dispatch
+        batch — the ``on_acquire`` parser emits several deltas per dispatch
         (INFLIGHT / DISPATCHED / PROMPT_LEN_SUM), so batching avoids N lock
         cycles per request on the hot path.
 
