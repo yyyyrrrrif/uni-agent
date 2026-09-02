@@ -37,8 +37,8 @@ agent_aware_router/
    │    ├── per_replica_store.py / per_request_store.py
    ├── collectors/                   ← collect vLLM signals
    │    ├── collector.py/provider.py ← collector lifecycle
-   │    ├── decoder/vllm/metrics.py  ← /metrics polling → dict
-   │    ├── decoder/vllm/kv.py, kv_event.py  ← kv-events zmq → incremental block state
+   │    ├── parse/vllm/metrics.py  ← /metrics polling → dict
+   │    ├── parse/vllm/kv.py, kv_event.py  ← kv-events zmq → incremental block state
    │    └── transport/{http,zmq,callback}.py
    ├── config/                       ← KVCAwareConfig + StrategyConfig
    ├── types/                        ← SlowCut / OverloadMode / Layer / MetricKey enums

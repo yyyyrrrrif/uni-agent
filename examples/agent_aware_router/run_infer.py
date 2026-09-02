@@ -18,7 +18,7 @@ is ``rollout.n`` (``--n``).
 
 The router is wired through verl's plugin mechanism (``rollout.router_config_path``):
 strategy overrides are applied to the packaged
-``uni_agent/llm_router/configs/kvc_aware_router.yaml`` and the temp copy is handed
+``uni_agent/agent_aware_router/configs/router.yaml`` and the temp copy is handed
 to verl. ``--task-config`` selects the agent/sandbox per row (required; same YAML
 shape as ``examples/inference/parallel_infer_verl.py``); the policy endpoint is
 the gateway session, bound by the runner, not a flag.
@@ -26,7 +26,7 @@ the gateway session, bound by the runner, not a flag.
 KV-cache-aware knobs:
 
   --router-config-path  packaged router YAML to override + point router_config_path at
-                        (default pkg://uni_agent.llm_router.configs/router.yaml)
+                        (default pkg://uni_agent.agent_aware_router.configs/router.yaml)
   --kv-events           vLLM kv-events zmq publisher; the kvcaware collector's load signal
                         (retained-cache occupancy).
   --load-threshold      strategy[0] overrides; each falls back to the packaged YAML value.
@@ -34,10 +34,10 @@ KV-cache-aware knobs:
 
 Example (single node, 2-way tensor parallel, kvcaware router + kv-events)::
 
-    python examples/llm_router/run_infer.py \
+    python examples/agent_aware_router/run_infer.py \
         --data-path ~/data/swe_agent/swe_bench_verified_openyuanrong.parquet \
         --model-path ~/models/Qwen/Qwen3-8B \
-        --task-config examples/llm_router/task_config_mini_swe_agent.yaml \
+        --task-config examples/agent_aware_router/task_config_mini_swe_agent.yaml \
         --tool-parser qwen3_coder --tensor-parallel-size 2 \
         --max-model-len 40960 --limit 1
 """
@@ -63,8 +63,10 @@ try:
 except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ is missing)
     from verl.utils.transferqueue_utils import tq
 
+from uni_agent.agent_aware_router import (
+    server as _kv_events_server,  # noqa: F401  (import overrides the vllm rollout backend)
+)
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
-from uni_agent.llm_router import server as _kv_events_server  # noqa: F401  (import overrides the vllm rollout backend)
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -82,7 +84,7 @@ DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
 
 # Default router plugin YAML (FQN-injected). Strategy overrides land on a temp copy.
-DEFAULT_ROUTER_CONFIG_PATH = "pkg://uni_agent.llm_router.configs/router.yaml"
+DEFAULT_ROUTER_CONFIG_PATH = "pkg://uni_agent.agent_aware_router.configs/router.yaml"
 
 # Ray's default idle-worker reaper (~10 s) kills agent workers between dispatch
 # gaps, ending the job prematurely.
@@ -131,7 +133,7 @@ def _write_overridden_router_yaml(
     The router config is loaded by verl at LLMServerManager init time through
     ``rollout.router_config_path``. Overrides must land on a real
     file this driver controls. Defaults come from the packaged YAML
-    (``uni_agent/llm_router/configs/``), matching what a no-flag run loads.
+    (``uni_agent/agent_aware_router/configs/``), matching what a no-flag run loads.
     """
     import tempfile
     import uuid
