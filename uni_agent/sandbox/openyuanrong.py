@@ -26,6 +26,35 @@ logger = logging.getLogger(__name__)
 _sdk_initialized = False
 
 
+def _patch_tunnel_scheme() -> None:
+    """Upgrade the SDK's reverse-tunnel URL to wss:// behind TLS gateways.
+
+    akernel_sdk builds ``tunnel_ws_url = f"ws://{gateway}/{id}/{port}"`` with a
+    hardcoded ``ws://`` scheme. When the gateway address carries the TLS port
+    (:443) the plaintext handshake never reaches the per-sandbox Traefik route
+    (HTTP 404, "route may be missing") and TunnelClient times out. Rewriting to
+    ``wss://`` for :443 gateways fixes it; plain-host gateways keep ``ws://``.
+    """
+    try:
+        from yr.sandbox import tunnel_client as _tc
+
+        _orig_start = _tc.TunnelClient.start
+
+        def _start_wss(self: Any, tunnel_url: str, timeout: float = 10.0) -> bool:  # noqa: ANN001
+            if tunnel_url.startswith("ws://"):
+                rest = tunnel_url[len("ws://"):]
+                if rest.split("/", 1)[0].endswith(":443"):
+                    tunnel_url = "wss://" + rest
+                    logger.debug("openyuanrong: tunnel URL upgraded to wss:// (TLS gateway)")
+            return _orig_start(self, tunnel_url, timeout=timeout)
+
+        if getattr(_tc.TunnelClient.start, "_yr_wss_patched", False) is False:
+            _start_wss._yr_wss_patched = True
+            _tc.TunnelClient.start = _start_wss
+    except ImportError:
+        pass  # SDK layout differs; tunnel untouched
+
+
 def _resolve_sandbox_name() -> str | None:
     """Return ``{prefix}{random}`` when ``SANDBOX_NAME_PREFIX`` env is set."""
     prefix = os.getenv("SANDBOX_NAME_PREFIX")
@@ -67,6 +96,7 @@ def _load_sandbox_module() -> Any:
                 "Please install it or set USE_OPENYUANRONG_SDK=1."
             ) from exc
     sys.modules["openyuanrong_sandbox_sdk"] = mod
+    _patch_tunnel_scheme()
     _sdk_initialized = True
     return mod
 
