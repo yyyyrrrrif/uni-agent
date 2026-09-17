@@ -55,6 +55,7 @@ DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
     "overload_mode": OverloadMode.REMAINING_CAP,
     "tie_tolerance": 0.05,
     "seed": None,
+    "capacity_threshold": 0.5,
 }
 
 
