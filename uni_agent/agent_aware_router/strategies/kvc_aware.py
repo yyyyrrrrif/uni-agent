@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,7 @@ DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
     "do_shortcut": True,
     "slow_cut": SlowCut.CAPACITY_TOKEN_AWARE,
     "overload_mode": OverloadMode.KV_CACHE_USAGE_PERC,
+    "tie_tolerance": 0.05,
 }
 
 
@@ -74,6 +76,7 @@ class KVCacheAwareStrategy:
         slow_cut: SlowCut | str = SlowCut.CAPACITY_TOKEN_AWARE,
         load_weights: tuple[float, float, float, float] = DEFAULT_LOAD_WEIGHTS,
         overload_mode: OverloadMode | str = OverloadMode.KV_CACHE_USAGE_PERC,
+        tie_tolerance: float = 0.05,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
@@ -106,6 +109,8 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"load_weights must be 4 non-negative values, got {load_weights}")
         if abs(sum(load_weights) - 1.0) > 1e-6:
             raise StrategyError(f"load_weights must sum to 1.0, got {sum(load_weights)}")
+        if not 0 <= tie_tolerance <= 1:
+            raise StrategyError(f"tie_tolerance must be in [0, 1], got {tie_tolerance}")
 
         self.alpha = float(alpha)
         self.load_threshold = float(load_threshold)
@@ -115,20 +120,23 @@ class KVCacheAwareStrategy:
         self.slow_cut = slow_cut
         self.load_weights = tuple(load_weights)
         self.overload_mode = overload_mode
+        self.tie_tolerance = float(tie_tolerance)
         self._max_num_seqs: int | None = None
         self._max_num_batched_tokens: int | None = None
         logger.info(
             f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, "
             f"load_threshold={self.load_threshold:.2f}, load_weights={self.load_weights}, "
             f"memory_overload_filter={self.memory_overload_filter}, do_shortcut={self.do_shortcut}, "
-            f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}"
+            f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
+            f"tie_tolerance={self.tie_tolerance:.3f}"
         )
 
     def __repr__(self) -> str:
         return (
             f"KVCacheAwareStrategy(alpha={self.alpha}, load_threshold={self.load_threshold}, "
             f"memory_overload_filter={self.memory_overload_filter}, do_shortcut={self.do_shortcut}, "
-            f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value})"
+            f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
+            f"tie_tolerance={self.tie_tolerance})"
         )
 
     def set_capacity(self, max_num_seqs: int, max_num_batched_tokens: int) -> None:
@@ -169,6 +177,7 @@ class KVCacheAwareStrategy:
             do_shortcut=kwargs["do_shortcut"],
             slow_cut=kwargs["slow_cut"],
             overload_mode=kwargs["overload_mode"],
+            tie_tolerance=kwargs["tie_tolerance"],
         )
 
     def _compute_load(
@@ -366,6 +375,28 @@ class KVCacheAwareStrategy:
 
     # ── Capacity-gated token routing (CAPACITY_TOKEN_AWARE) ───────────
 
+    def _soft_pick(self, values: list[float], *, maximize: bool) -> int:
+        """Pick an index from the tolerance band around the best value.
+
+        ``v`` is a tie with ``best`` when the gap is within
+        ``tie_tolerance × |best|``; the winner is then drawn uniformly from that
+        candidate set instead of always taking the strict argmax/argmin — this
+        spreads requests when replicas are near-equal (otherwise a tiny,
+        poll-lag-driven difference pins every request to one "nominal best").
+
+        Gap form (``|best − v|``) rather than ``v ≥ best × (1 − tol)`` because
+        ``best`` is often negative here (``remaining`` under overload): the
+        multiplicative form yields an empty candidate set whenever ``best < 0``.
+        ``tie_tolerance == 0`` (or ``best == 0``) collapses the band to exactly
+        equal values, so only an exact tie is resolved randomly.
+        """
+        best = max(values) if maximize else min(values)
+        gap = self.tie_tolerance * abs(best)
+        candidates = [i for i, v in enumerate(values) if (best - v if maximize else v - best) <= gap]
+        if len(candidates) > 1:
+            logger.debug(f"soft-pick: candidates={candidates} values={values} tol={self.tie_tolerance}")
+        return random.choice(candidates)  # non-empty: best itself is always in the band
+
     def _total_token_capacity(self, store: DataStore) -> int:
         """Per-replica KV-cache token capacity = ``num_gpu_blocks × block_size``.
 
@@ -398,9 +429,12 @@ class KVCacheAwareStrategy:
             remaining[i] = avail[i] - need[i]                    # free tokens after assign
             eligible[i]  = avail[i] >= cap × (1 - load_threshold)   # pure capacity gate
 
-        pick ``argmin(inflight_tokens)`` (least in-flight tokens wins) to keep
-        the first wave from collapsing onto ``pool[0]``.
-        Otherwise pick ``argmax(eligible, remaining)``.
+        Cold start (no sticky binding) picks ``argmin(inflight_tokens)``; the
+        no-eligible pool falls back to all replicas; otherwise the eligible set
+        is used. Every pick goes through :meth:`_soft_pick`, so near-equal
+        values are resolved randomly inside the ``tie_tolerance`` band rather
+        than by the strict most-extreme value (which is what lets the first
+        wave of all-tied replicas collapse onto ``pool[0]``).
         """
         n = len(replicas)
         cap = self._total_token_capacity(store)
@@ -441,15 +475,16 @@ class KVCacheAwareStrategy:
         thresh = cap * (1.0 - self.load_threshold)
         cold_start = store.get_sticky_binding(request_id) is None
         if cold_start:
-            top = min(range(n), key=lambda i: rows[i]["inflight_tokens"])
-            logger.info("score(): CAPACITY_TOKEN_AWARE cold start → min inflight_tokens")
+            top = self._soft_pick([rows[i]["inflight_tokens"] for i in range(n)], maximize=False)
+            logger.info("score(): CAPACITY_TOKEN_AWARE cold start → soft-pick min inflight_tokens")
         else:
             eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
-            if not eligible:
-                top = max(range(n), key=lambda i: rows[i]["remaining"])
-                logger.info("score(): CAPACITY_TOKEN_AWARE no eligible → max remaining")
-            else:
-                top = max(eligible, key=lambda i: rows[i]["remaining"])
+            pool = eligible or list(range(n))
+            top = pool[self._soft_pick([rows[i]["remaining"] for i in pool], maximize=True)]
+            logger.info(
+                f"score(): CAPACITY_TOKEN_AWARE "
+                f"{'no eligible' if not eligible else 'eligible'} → soft-pick max remaining"
+            )
 
         for i, row in enumerate(rows):
             tag = " ← WINNER" if i == top else ""

@@ -424,6 +424,7 @@ class TestStrategyContract:
                     "kv_cache_usage_perc": 0.3,
                     "num_requests_running": 1,
                     "num_requests_waiting": 0,
+                    "inflight_tokens": 0,
                     "gpu_hit_pct": 80,
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
                 },
@@ -431,6 +432,9 @@ class TestStrategyContract:
                     "kv_cache_usage_perc": 0.5,
                     "num_requests_running": 2,
                     "num_requests_waiting": 0,
+                    # Distinct from rep_a so the cold-start soft-pick has a strict
+                    # argmin instead of an exact tie (which would randomize).
+                    "inflight_tokens": 100,
                     "gpu_hit_pct": 0,
                     "tiers": {"cpu": 0.5, "ssd": 0.0},
                 },
@@ -484,6 +488,7 @@ class TestFromConfig:
                     "kv_cache_usage_perc": 0.3,
                     "num_requests_running": 1,
                     "num_requests_waiting": 0,
+                    "inflight_tokens": 0,
                     "gpu_hit_pct": 80,
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
                 },
@@ -491,6 +496,9 @@ class TestFromConfig:
                     "kv_cache_usage_perc": 0.92,
                     "num_requests_running": 0,
                     "num_requests_waiting": 0,
+                    # Strict argmin (gap 100 > 0.05 × 0) — keeps both strategies'
+                    # cold-start soft-pick deterministic and comparable.
+                    "inflight_tokens": 100,
                     "gpu_hit_pct": 0,
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
                 },
@@ -573,6 +581,32 @@ class TestFromConfigDebugEnv:
         assert strat.memory_overload_filter is False
         assert strat.layer_weights == {Layer.GPU: 0.6, Layer.CPU: 0.3, Layer.SSD: 0.1}
 
+    def test_tie_tolerance_env_override_and_error_layering(self, monkeypatch):
+        """TIE_TOLERANCE: coercion first (ConfigError), then range (StrategyError)."""
+        from uni_agent.agent_aware_router.config.base import ConfigError
+        from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
+
+        cfg = KVCAwareStrategyConfig(load_threshold=0.85)
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", TIE_TOLERANCE="0.2"),
+        )
+        assert KVCacheAwareStrategy.from_config(cfg).tie_tolerance == pytest.approx(0.2)
+
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", TIE_TOLERANCE="high"),
+        )
+        with pytest.raises(ConfigError, match="tie_tolerance"):
+            KVCacheAwareStrategy.from_config(cfg)
+
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", TIE_TOLERANCE="1.5"),
+        )
+        with pytest.raises(StrategyError, match="tie_tolerance"):
+            KVCacheAwareStrategy.from_config(cfg)
+
     @pytest.mark.parametrize(
         ("knob", "value", "match"),
         [
@@ -580,6 +614,7 @@ class TestFromConfigDebugEnv:
             ("OVERLOAD_MODE", "sometimes", "overload_mode"),
             ("DO_SHORTCUT", "maybe", "do_shortcut"),
             ("ALPHA", "high", "alpha"),
+            ("TIE_TOLERANCE", "high", "tie_tolerance"),
             ("LAYER_WEIGHTS", "not json", "layer_weights"),
             ("LAYER_WEIGHTS", "[1, 2]", "layer_weights"),
             ("LAYER_WEIGHTS", '{"npu": 0.5}', "layer_weights"),
@@ -732,8 +767,15 @@ class TestFallbackModes:
         strat = _strat(load_threshold=0.9, memory_overload_filter=False)
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 1000},
-                "rep_b": {"kv_cache_usage_perc": 0.3},
+                # cap must be > 0 (num_gpu_blocks) so the post-fallback ranking has a
+                # strict winner: with cap=0 both replicas tie and soft-pick randomizes.
+                "rep_a": {
+                    "num_gpu_blocks": 100,
+                    "kv_cache_usage_perc": 0.95,
+                    "num_requests_running": 64,
+                    "num_requests_waiting": 1000,
+                },
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 1.0},
             },
             sticky={"r1": "rep_a"},
         )
@@ -867,3 +909,143 @@ class TestCapacityTokenAware:
         s_high = high.score(PROMPT_IDS, p_high, _replicas("rep_a", "rep_b"), request_id="r1")
         assert s_high[1] == STICKY_TOP_SCORE
         assert s_high[0] == 0.0  # rep_a filtered by the higher gate
+
+    def test_soft_pick_randomizes_within_tolerance_band(self):
+        """
+        Feature: tie_tolerance soft-pick — near-equal remaining values share the win
+        Description: rep_a full → filtered; rep_b remaining=797, rep_c remaining=789
+          (gap 8 ≤ 0.05·797 ≈ 39.9 → same tolerance band)
+        Expectation: repeated calls return both rep_b and rep_c; neither is pinned
+        """
+        strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5},
+                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.505},
+            }
+        )
+        # Non-cold (binding present) → capacity path; do_shortcut=False so the
+        # binding does not short-circuit into the sticky branch.
+        provider.put_sticky_binding("r1", "rep_a")
+        winners = set()
+        for _ in range(200):
+            scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1")
+            winners.add(scores.index(STICKY_TOP_SCORE))
+        assert winners == {1, 2}
+
+    def test_soft_pick_strict_outside_tolerance_band(self):
+        """
+        Feature: soft-pick only randomizes inside the band — clear wins stay deterministic
+        Description: rep_b remaining=1597 (kv_perc=0), rep_c remaining=789 (kv_perc=0.505);
+          gap 808 > 0.05·1597 ≈ 79.9
+        Expectation: every call picks rep_b (strict argmax)
+        """
+        strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0},
+                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.505},
+            }
+        )
+        provider.put_sticky_binding("r1", "rep_a")
+        winners = {
+            strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1").index(
+                STICKY_TOP_SCORE
+            )
+            for _ in range(50)
+        }
+        assert winners == {1}
+
+    def test_tie_tolerance_zero_is_strict_argmax(self):
+        """
+        Feature: tie_tolerance=0 reproduces the pre-soft-pick strict argmax
+        Description: same near-equal pair as the band test (797 vs 789), tol=0
+        Expectation: every call picks rep_b — the tie band is exactly zero width
+        """
+        strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.0)
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5},
+                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.505},
+            }
+        )
+        provider.put_sticky_binding("r1", "rep_a")
+        winners = {
+            strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1").index(
+                STICKY_TOP_SCORE
+            )
+            for _ in range(50)
+        }
+        assert winners == {1}
+
+    def test_cold_start_soft_picks_min_inflight_tokens(self):
+        """
+        Feature: cold-start branch keeps argmin(inflight_tokens), now tolerance-banded
+        Description: no sticky binding → cold start. inflight_tokens 100 vs 103
+          (gap 3 ≤ 0.05·100 = 5 → tie band); 100 vs 120 (gap 20 > 5) is strict
+        Expectation: in-band pair spreads across both replicas; out-of-band pair pins rep_a
+        """
+        strat = self._cap_strat(do_shortcut=False)
+        in_band = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 100},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 103},
+            }
+        )
+        winners = {
+            strat.score(PROMPT_IDS, in_band, _replicas("rep_a", "rep_b")).index(STICKY_TOP_SCORE) for _ in range(200)
+        }
+        assert winners == {0, 1}  # tolerance band → randomized (was always pool[0] before v1)
+
+        out_of_band = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 100},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 120},
+            }
+        )
+        winners = {
+            strat.score(PROMPT_IDS, out_of_band, _replicas("rep_a", "rep_b")).index(STICKY_TOP_SCORE) for _ in range(50)
+        }
+        assert winners == {0}
+
+    def test_soft_pick_negative_best_band_is_symmetric(self):
+        """
+        Feature: gap form on a negative best (no-eligible pool) stays in-band
+        Description: values [-16, -24] → best=-16, gap=8. tol=0.5 → band 0.5·16=8 (tie);
+          tol=0.05 → band 0.8 (strict). The multiplicative form would give an empty set here
+        Expectation: tol=0.5 spreads; tol=0.05 pins index 0
+        """
+        loose = self._cap_strat(tie_tolerance=0.5)
+        assert {loose._soft_pick([-16.0, -24.0], maximize=True) for _ in range(200)} == {0, 1}
+        strict = self._cap_strat(tie_tolerance=0.05)
+        assert {strict._soft_pick([-16.0, -24.0], maximize=True) for _ in range(50)} == {0}
+
+    def test_soft_pick_zero_best_only_exact_ties(self):
+        """
+        Feature: best=0 has no relative band (gap=0) — only exact zeros tie
+        Description: values [0, 0, -5] with the default tol=0.05
+        Expectation: candidates are the two zeros; -5 never wins
+        """
+        strat = self._cap_strat()
+        assert {strat._soft_pick([0.0, 0.0, -5.0], maximize=True) for _ in range(200)} == {0, 1}
+
+    def test_tie_tolerance_validation_default_and_repr(self):
+        """
+        Feature: tie_tolerance is an internal knob with [0, 1] validation
+        Description: out-of-range direct construction; default and from_config values;
+          __repr__ carries the field
+        Expectation: StrategyError for -0.1 / 1.5; default 0.05 everywhere; repr mentions it
+        """
+        from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
+
+        for bad in (-0.1, 1.5):
+            with pytest.raises(StrategyError, match="tie_tolerance"):
+                self._cap_strat(tie_tolerance=bad)
+        strat = self._cap_strat()
+        assert strat.tie_tolerance == pytest.approx(0.05)
+        assert "tie_tolerance=0.05" in repr(strat)
+        from_cfg = KVCacheAwareStrategy.from_config(KVCAwareStrategyConfig(load_threshold=0.85))
+        assert from_cfg.tie_tolerance == pytest.approx(0.05)  # knob default, not a cfg field
