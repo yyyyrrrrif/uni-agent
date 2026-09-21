@@ -302,7 +302,7 @@ class KVCacheAwareStrategy:
             if self.slow_cut == SlowCut.PREFIX_LOAD_AWARE:
                 return self._prefix_load_aware(store, replicas, gpu_hash_strs)
             if self.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE:
-                return self._capacity_token_scores(store, replicas, request_id, prompt_ids or [], gpu_hash_strs)
+                return self._capacity_token_scores(store, replicas, prompt_ids or [], gpu_hash_strs)
             raise ValueError(f"Unknow slowcut type {self.slow_cut}")
         finally:
             emitter.on_route(time.perf_counter() - t0)
@@ -416,28 +416,40 @@ class KVCacheAwareStrategy:
         self,
         store: DataStore,
         replicas: list[ReplicaInfo],
-        request_id: str | None,
         prompt_ids: list[int],
         gpu_hash_strs: list[str],
     ) -> list[float]:
         """Capacity-gated token routing (discrete: winner=STICKY_TOP_SCORE, rest 0).
 
-        For each replica ``i``::
+        The load account is the router's **own** book, not the engine's polled
+        gauge: every dispatch books the *uncached* part of its prompt into
+        ``INFLIGHT_TOKENS`` and every release subtracts it again (collector:
+        ``plen × (1 − gpu_hit)``), so for each replica ``i``::
 
-            avail[i]     = cap × (1 - kv_cache_usage_perc[i])   # free tokens (no cache)
+            avail[i]     = cap - inflight_tokens[i]              # free capacity (tokens)
             need[i]      = len(prompt_ids) × (1 - gpu_hit[i])    # prefill this req adds
-            remaining[i] = avail[i] - need[i]                    # free tokens after assign
+            remaining[i] = avail[i] - need[i]                    # free capacity after assign
             eligible[i]  = avail[i] >= cap × (1 - load_threshold)   # pure capacity gate
 
-        Cold start (no sticky binding) picks ``argmin(inflight_tokens)`` — the
-        *uncached* in-flight token load, since the collector folds each dispatch
-        by ``plen × (1 − gpu_hit)``, so a replica re-reading a warm prefix does
-        not look loaded. The no-eligible pool falls back to all replicas;
+        Why this account over ``cap × (1 - kv_cache_usage_perc)``: ``kv_perc`` is
+        polled (5 s stale, so a whole fan-out burst reads the same pre-burst
+        value) and running-only (an idle replica holding a full but evictable
+        cache reports 0.000). ``INFLIGHT_TOKENS`` instead moves at dispatch time,
+        is net of the confirmed prefix cache, and counts exactly the tokens that
+        will occupy new blocks. Its blind spot is decode growth — the gauge
+        carries prompt tokens only, so a replica whose in-flight requests
+        generate long outputs looks emptier than it is. ``kv_perc`` stays in the
+        logs below as the engine-side cross-check for that.
+
+        ``cap`` is the only yardstick that makes the token account comparable;
+        before the first KV event lands (``cap == 0``) the ranking falls back to
+        the in-flight request count (:data:`MetricKey.INFLIGHT_COUNT`), a neutral
+        integer signal. The no-eligible pool falls back to all replicas;
         otherwise the eligible set is used. Every pick goes through
-        :meth:`_soft_pick`, so near-equal
-        values are resolved randomly inside the ``tie_tolerance`` band rather
-        than by the strict most-extreme value (which is what lets the first
-        wave of all-tied replicas collapse onto ``pool[0]``).
+        :meth:`_soft_pick`, so near-equal values are resolved randomly inside the
+        ``tie_tolerance`` band rather than by the strict most-extreme value
+        (which is what lets the first wave of all-tied replicas collapse onto
+        ``pool[0]``).
         """
         n = len(replicas)
         cap = self._total_token_capacity(store)
@@ -448,7 +460,7 @@ class KVCacheAwareStrategy:
             inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
             inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
             s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
-            avail = cap * (1.0 - kv_perc)
+            avail = cap - inflight_tokens
             need = plen * (1.0 - gpu_hit)
             remaining = avail - need
             # Emit as fractions of capacity (default-bucket friendly); skip when cap unknown.
@@ -475,12 +487,13 @@ class KVCacheAwareStrategy:
                 }
             )
 
-        thresh = cap * (1.0 - self.load_threshold)
-        cold_start = store.get_sticky_binding(request_id) is None
-        if cold_start:
-            top = self._soft_pick([rows[i]["inflight_tokens"] for i in range(n)], maximize=False)
-            logger.info("score(): CAPACITY_TOKEN_AWARE cold start → soft-pick min inflight_tokens")
+        if cap <= 0:
+            # No token yardstick yet (first KV event not in): the token account has
+            # no neutral baseline, so rank by in-flight request count instead.
+            top = self._soft_pick([rows[i]["inflight"] for i in range(n)], maximize=False)
+            logger.info("score(): CAPACITY_TOKEN_AWARE cap unknown → soft-pick min inflight")
         else:
+            thresh = cap * (1.0 - self.load_threshold)
             eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
             pool = eligible or list(range(n))
             top = pool[self._soft_pick([rows[i]["remaining"] for i in pool], maximize=True)]
@@ -501,7 +514,9 @@ class KVCacheAwareStrategy:
         winner = rows[top]["replica"].replica_id
         logger.info(
             f"score(): CAPACITY_TOKEN_AWARE winner={winner} "
-            f"(kv_perc={rows[top]['kv_perc']:.3f}, remaining={rows[top]['remaining']:.0f})"
+            f"(avail={rows[top]['avail']:.0f}, need={rows[top]['need']:.0f}, "
+            f"remaining={rows[top]['remaining']:.0f}, inflight_tokens={rows[top]['inflight_tokens']}, "
+            f"kv_perc={rows[top]['kv_perc']:.3f})"
         )
         # Per-replica capacity signal for the plot (mirrors route-load in prefix-load-aware).
         cap_loads = {row["replica"].replica_id: row["remaining"] for row in rows}

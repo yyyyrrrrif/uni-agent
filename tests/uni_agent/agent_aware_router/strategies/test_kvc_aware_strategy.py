@@ -73,6 +73,10 @@ def _replicas(*ids: str) -> list[ReplicaInfo]:
 
 PROMPT_IDS = [1, 2, 3]
 
+# Long prompt for the tests where ``need = plen × (1 − gpu_hit)`` must be large
+# enough to outrank a capacity difference (1024 tokens = 64 blocks at 16).
+LONG_PROMPT_IDS = list(range(1024))
+
 
 # --------------------------------------------------------------------------- #
 # Test doubles
@@ -485,6 +489,7 @@ class TestFromConfig:
         provider = FakeRouteDataProvider(
             {
                 "rep_a": {
+                    "num_gpu_blocks": 100,
                     "kv_cache_usage_perc": 0.3,
                     "num_requests_running": 1,
                     "num_requests_waiting": 0,
@@ -493,11 +498,13 @@ class TestFromConfig:
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
                 },
                 "rep_b": {
+                    "num_gpu_blocks": 100,
                     "kv_cache_usage_perc": 0.92,
                     "num_requests_running": 0,
                     "num_requests_waiting": 0,
-                    # Strict argmin (gap 100 > 0.05 × 0) — keeps both strategies'
-                    # cold-start soft-pick deterministic and comparable.
+                    # cap=1600 → avail 1600 vs 1500 → remaining 1597 vs 1497:
+                    # gap 100 > 0.05 × 1597, so both strategies pick rep_a
+                    # deterministically (the soft-pick band must not decide here).
                     "inflight_tokens": 100,
                     "gpu_hit_pct": 0,
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
@@ -806,150 +813,184 @@ class TestFallbackModes:
 # --------------------------------------------------------------------------- #
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.cpu
+@pytest.mark.level0
 class TestCapacityTokenAware:
-    """``slow_cut=capacity-token-aware``: a pure capacity gate excludes
-    physically-full replicas, then the largest post-prefill ``remaining`` wins.
+    """``slow_cut=capacity-token-aware``: free capacity is the router's own book.
 
-    cap = num_gpu_blocks × block_size. Tests use num_gpu_blocks=100 and the
-    fake provider's block_size=16 → cap=1600; the gate threshold is
-    ``cap × (1 - load_threshold)`` — at the default ``load_threshold=0.9``
-    that is 1600 × 0.1 = 160 free tokens.
+    ``avail = cap - INFLIGHT_TOKENS`` (the token load the collector books per
+    dispatch, already net of each replica's prefix-cache hit), the gate excludes
+    replicas whose book is nearly full, and the largest post-prefill
+    ``remaining = avail - need`` wins. ``kv_perc`` is logged but never decides.
+
+    cap = num_gpu_blocks × block_size. Tests use num_gpu_blocks=100 and the fake
+    provider's block_size=16 → cap=1600; the gate threshold is
+    ``cap × (1 - load_threshold)`` — at the default ``load_threshold=0.9`` that
+    is 160 free tokens. ``PROMPT_IDS`` is 3 tokens long, so ``need`` is 0-3.
     """
 
     def _cap_strat(self, **kwargs) -> KVCacheAwareStrategy:
         kwargs.setdefault("slow_cut", SlowCut.CAPACITY_TOKEN_AWARE)
         return _strat(**kwargs)
 
-    def test_capacity_gate_picks_max_remaining_and_filters_full(self):
+    def test_gate_filters_booked_replicas_and_picks_max_remaining(self):
         """
-        Feature: slow_cut=capacity-token-aware; eligible = avail >= cap·(1-load_threshold)
-        Description: 3 replicas — rep_a cache-rich but full (avail=16 < thresh=160) → filtered;
-          rep_b (avail=800) and rep_c (avail=480) both eligible → argmax(remaining) picks rep_b
+        Feature: eligible = avail >= cap·(1-load_threshold); winner = argmax(remaining)
+        Description: 3 unbound replicas — rep_a's book is nearly full
+          (avail=16 < thresh=160) → filtered; rep_b (avail=800) and rep_c (avail=480)
+          are eligible → argmax(remaining) picks rep_b
         Expectation: scores = [0.0, STICKY_TOP_SCORE, 0.0]; route() picks rep_b
-          rep_a: avail=1600·(1-0.99)=16 < thresh=160 → filtered (despite gpu_hit=100)
-          rep_b: avail=1600·(1-0.5)=800 >= thresh=160 → eligible, largest remaining → winner
-          rep_c: avail=1600·(1-0.7)=480 >= thresh=160 → eligible, but smaller than rep_b
+          rep_a: avail=1600-1584=16 < 160 → filtered (despite gpu_hit=100)
+          rep_b: avail=1600-800=800 → remaining=797 → winner
+          rep_c: avail=1600-1120=480 → remaining=477 → eligible but smaller
         """
         strat = self._cap_strat()
+        replicas = _replicas("rep_a", "rep_b", "rep_c")
         provider = FakeRouteDataProvider(
             {
-                # rep_a: perfect cache but essentially full → avail=16 < thresh=160.
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99, "gpu_hit_pct": 100},
+                # rep_a: perfect cache but its book is nearly full → filtered.
+                "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1584, "gpu_hit_pct": 100},
                 # rep_b: no cache but plenty of room → avail=800.
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5, "gpu_hit_pct": 0},
+                "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800, "gpu_hit_pct": 0},
                 # rep_c: eligible but less remaining than rep_b → argmax is non-trivial.
-                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.7, "gpu_hit_pct": 0},
+                "rep_c": {"num_gpu_blocks": 100, "inflight_tokens": 1120, "gpu_hit_pct": 0},
             },
         )
-        provider.put_sticky_binding("r1", "rep_b")
-        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1")
-        assert scores == [0.0, STICKY_TOP_SCORE, 0.0]  # rep_b wins; rep_a filtered, rep_c 0
-        # anti-kidnapping via route(): cache-rich rep_a is dropped despite best cache
-        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), "r1")
-        assert ranking[0] == "rep_b"
+        # No sticky binding anywhere: the capacity path is the ONLY path (the old
+        # cold-start branch is gone), so this is also the unbound-request case.
+        scores = strat.score(PROMPT_IDS, provider, replicas, request_id="r1")
+        assert scores == [0.0, STICKY_TOP_SCORE, 0.0]
+        # anti-kidnapping via route(): the cache-rich rep_a is dropped despite best cache
+        assert route(strat, PROMPT_IDS, provider, replicas, "r1")[0] == "rep_b"
 
-    def test_cold_start_falls_back_to_inflight(self):
+    def test_avail_tracks_inflight_tokens_not_kv_perc(self):
         """
-        Feature: cold-start branch — no sticky binding → argmin(inflight_tokens)
-        Description: kv_perc≈0 (metrics not polled yet); pick fewest in-flight tokens
-        Expectation: rep_b (inflight=128) wins over rep_a (inflight=512)
+        Feature: kv_perc is observation-only — free capacity = cap − inflight_tokens
+        Description: rep_a reports 99% kv usage but has an empty router book;
+          rep_b reports 0% kv usage but has booked 1500 tokens
+        Expectation: rep_a eligible (avail=1600) and wins; rep_b filtered (avail=100)
         """
         strat = self._cap_strat()
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 512},
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 128},
+                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99, "inflight_tokens": 0},
+                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 1500},
             },
         )
-        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"))
-        assert scores[1] == STICKY_TOP_SCORE  # rep_b: fewest in-flight
-        assert scores[0] == 0.0
-
-    def test_all_overloaded_picks_max_remaining(self):
-        """
-        Feature: no-eligible fallback — argmax(remaining) across ALL replicas
-        Description: both replicas below gate (kv_perc≥1e-2, not cold) → never errors
-        Expectation: rep_a (avail=16) wins over rep_b (avail=8); larger remaining
-        """
-        strat = self._cap_strat()
-        provider = FakeRouteDataProvider(
-            {
-                # Both below thresh=160 but not cold (kv_perc >= 1e-2).
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},  # avail=16
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.995},  # avail=8
-            },
-        )
-        provider.put_sticky_binding("r1", "rep_a")
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), request_id="r1")
-        assert scores[0] == STICKY_TOP_SCORE  # rep_a: larger remaining among the overloaded
+        assert scores == [STICKY_TOP_SCORE, 0.0]
 
-    def test_capacity_gate_threshold_via_load_threshold(self):
+    def test_gate_threshold_via_load_threshold_flips_the_winner(self):
         """
-        Feature: gate threshold = cap·(1-load_threshold); load_threshold tunes the gate
-        Description: cap=1600; rep_a avail=160, rep_b avail=800. Low threshold → both
-          eligible; high threshold → rep_a filtered, rep_b still eligible
+        Feature: the gate (not the order) is what load_threshold tunes
+        Description: long prompt (1024 tokens) so need is big: rep_a avail=150 with a
+          full cache hit (need=0 → remaining=150), rep_b avail=800 but no cache
+          (need=1024 → remaining=−224)
         Expectation:
-          low (load_threshold=0.99, thresh=16): rep_b wins → STICKY_TOP_SCORE
-          high (load_threshold=0.85, thresh=240): rep_a filtered (0.0), rep_b wins
+          load_threshold=0.9 (thresh=160): rep_a filtered (150 < 160) → rep_b wins
+          load_threshold=0.99 (thresh=16): rep_a eligible → 150 > −224 → rep_a wins
         """
         data = {
-            "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.9, "gpu_hit_pct": 100},
-            "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5, "gpu_hit_pct": 0},
+            "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1450, "gpu_hit_pct": 100},
+            "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800, "gpu_hit_pct": 0},
         }
-        # Low threshold (thresh=1600·(1-0.99)=16): both eligible → rep_b wins on remaining.
-        low = self._cap_strat(load_threshold=0.99)
-        p_low = FakeRouteDataProvider(dict(data))
-        p_low.put_sticky_binding("r1", "rep_b")
-        s_low = low.score(PROMPT_IDS, p_low, _replicas("rep_a", "rep_b"), request_id="r1")
-        assert s_low[1] == STICKY_TOP_SCORE
-        # High threshold (thresh=1600·(1-0.85)=240): rep_a (avail=160) filtered, rep_b wins.
-        high = self._cap_strat(load_threshold=0.85)
-        p_high = FakeRouteDataProvider(dict(data))
-        p_high.put_sticky_binding("r1", "rep_b")
-        s_high = high.score(PROMPT_IDS, p_high, _replicas("rep_a", "rep_b"), request_id="r1")
-        assert s_high[1] == STICKY_TOP_SCORE
-        assert s_high[0] == 0.0  # rep_a filtered by the higher gate
+        replicas = _replicas("rep_a", "rep_b")
+        strict = self._cap_strat(load_threshold=0.9)
+        assert strict.score(LONG_PROMPT_IDS, FakeRouteDataProvider(dict(data)), replicas, request_id="r1") == [
+            0.0,
+            STICKY_TOP_SCORE,
+        ]
+        loose = self._cap_strat(load_threshold=0.99)
+        assert loose.score(LONG_PROMPT_IDS, FakeRouteDataProvider(dict(data)), replicas, request_id="r1") == [
+            STICKY_TOP_SCORE,
+            0.0,
+        ]
+
+    def test_all_overloaded_falls_back_to_the_full_pool(self):
+        """
+        Feature: empty gate → pool = all replicas, same remaining order (no error)
+        Description: every replica is below thresh=160 → fallback
+        Expectation: rep_a (avail=16 → remaining 13) beats rep_b (avail=8 → 5)
+        """
+        strat = self._cap_strat()
+        provider = FakeRouteDataProvider(
+            {
+                "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1584},
+                "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 1592},
+            },
+        )
+        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), request_id="r1")
+        assert scores == [STICKY_TOP_SCORE, 0.0]
+
+    def test_cap_unknown_falls_back_to_inflight_request_count(self):
+        """
+        Feature: cap=0 (first KV event not in) → the token account has no yardstick
+        Description: no num_gpu_blocks metric at all; rank by INFLIGHT_COUNT instead
+          (2 vs 0 → rep_b), and exact ties spread through the soft-pick band
+        Expectation: rep_b wins on count; an all-idle pair spreads across both
+        """
+        strat = self._cap_strat(do_shortcut=False)
+        loaded = FakeRouteDataProvider(
+            {
+                "rep_a": {"inflight_count": 2},
+                "rep_b": {"inflight_count": 0},
+            }
+        )
+        assert strat.score(PROMPT_IDS, loaded, _replicas("rep_a", "rep_b"), request_id="r1") == [
+            0.0,
+            STICKY_TOP_SCORE,
+        ]
+
+        idle = FakeRouteDataProvider(
+            {
+                "rep_a": {"inflight_count": 0},
+                "rep_b": {"inflight_count": 0},
+            }
+        )
+        winners = {
+            strat.score(PROMPT_IDS, idle, _replicas("rep_a", "rep_b"), request_id="r1").index(STICKY_TOP_SCORE)
+            for _ in range(200)
+        }
+        assert winners == {0, 1}  # exact tie → soft-pick spreads (no pool[0] collapse)
 
     def test_soft_pick_randomizes_within_tolerance_band(self):
         """
         Feature: tie_tolerance soft-pick — near-equal remaining values share the win
-        Description: rep_a full → filtered; rep_b remaining=797, rep_c remaining=789
-          (gap 8 ≤ 0.05·797 ≈ 39.9 → same tolerance band)
+        Description: rep_a book-full → filtered; rep_b remaining=797, rep_c remaining=787
+          (gap 10 ≤ 0.05·797 ≈ 39.9 → same tolerance band)
         Expectation: repeated calls return both rep_b and rep_c; neither is pinned
         """
         strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5},
-                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.505},
+                "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1584},
+                "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800},
+                "rep_c": {"num_gpu_blocks": 100, "inflight_tokens": 810},
             }
         )
-        # Non-cold (binding present) → capacity path; do_shortcut=False so the
-        # binding does not short-circuit into the sticky branch.
-        provider.put_sticky_binding("r1", "rep_a")
-        winners = set()
-        for _ in range(200):
-            scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1")
-            winners.add(scores.index(STICKY_TOP_SCORE))
+        winners = {
+            strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1").index(
+                STICKY_TOP_SCORE
+            )
+            for _ in range(200)
+        }
         assert winners == {1, 2}
 
     def test_soft_pick_strict_outside_tolerance_band(self):
         """
         Feature: soft-pick only randomizes inside the band — clear wins stay deterministic
-        Description: rep_b remaining=1597 (kv_perc=0), rep_c remaining=789 (kv_perc=0.505);
-          gap 808 > 0.05·1597 ≈ 79.9
+        Description: rep_b remaining=1597 (empty book), rep_c remaining=787; gap 810 >
+          0.05·1597 ≈ 79.9
         Expectation: every call picks rep_b (strict argmax)
         """
         strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0},
-                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.505},
+                "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1584},
+                "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 0},
+                "rep_c": {"num_gpu_blocks": 100, "inflight_tokens": 810},
             }
         )
-        provider.put_sticky_binding("r1", "rep_a")
         winners = {
             strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1").index(
                 STICKY_TOP_SCORE
@@ -961,18 +1002,17 @@ class TestCapacityTokenAware:
     def test_tie_tolerance_zero_is_strict_argmax(self):
         """
         Feature: tie_tolerance=0 reproduces the pre-soft-pick strict argmax
-        Description: same near-equal pair as the band test (797 vs 789), tol=0
+        Description: same near-equal pair as the band test (797 vs 787), tol=0
         Expectation: every call picks rep_b — the tie band is exactly zero width
         """
         strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.0)
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99},
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.5},
-                "rep_c": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.505},
+                "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1584},
+                "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800},
+                "rep_c": {"num_gpu_blocks": 100, "inflight_tokens": 810},
             }
         )
-        provider.put_sticky_binding("r1", "rep_a")
         winners = {
             strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1").index(
                 STICKY_TOP_SCORE
@@ -980,36 +1020,6 @@ class TestCapacityTokenAware:
             for _ in range(50)
         }
         assert winners == {1}
-
-    def test_cold_start_soft_picks_min_inflight_tokens(self):
-        """
-        Feature: cold-start branch keeps argmin(inflight_tokens), now tolerance-banded
-        Description: no sticky binding → cold start. inflight_tokens 100 vs 103
-          (gap 3 ≤ 0.05·100 = 5 → tie band); 100 vs 120 (gap 20 > 5) is strict
-        Expectation: in-band pair spreads across both replicas; out-of-band pair pins rep_a
-        """
-        strat = self._cap_strat(do_shortcut=False)
-        in_band = FakeRouteDataProvider(
-            {
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 100},
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 103},
-            }
-        )
-        winners = {
-            strat.score(PROMPT_IDS, in_band, _replicas("rep_a", "rep_b")).index(STICKY_TOP_SCORE) for _ in range(200)
-        }
-        assert winners == {0, 1}  # tolerance band → randomized (was always pool[0] before v1)
-
-        out_of_band = FakeRouteDataProvider(
-            {
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 100},
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.0, "inflight_tokens": 120},
-            }
-        )
-        winners = {
-            strat.score(PROMPT_IDS, out_of_band, _replicas("rep_a", "rep_b")).index(STICKY_TOP_SCORE) for _ in range(50)
-        }
-        assert winners == {0}
 
     def test_soft_pick_negative_best_band_is_symmetric(self):
         """
