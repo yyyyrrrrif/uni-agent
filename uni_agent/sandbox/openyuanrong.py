@@ -23,6 +23,55 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _patch_tunnel_scheme() -> None:
+    """Upgrade the SDK's reverse-tunnel URL to wss:// behind TLS gateways.
+
+    The tunnel client lives in the SDK the provider loads (``yr_sandbox`` since
+    the yr_sandbox switch; ``yr.sandbox`` in the older akernel layout). When the
+    gateway address carries the TLS port (:443) a plaintext ``ws://`` handshake
+    never reaches the per-sandbox route (HTTP 404 from the ingress default
+    backend) and TunnelClient retries until timeout. Rewriting to ``wss://`` for
+    :443 gateways fixes it; plain-host gateways keep ``ws://``.
+
+    ``OPENYUANRONG_GATEWAY_TLS`` / ``ConnectionConfig.gateway_use_tls`` is the
+    supported knob and is applied first (see ``_connection_config``); this stays
+    as the fallback for SDK builds without it.
+    """
+    try:
+        from yr_sandbox import tunnel_client as _tc
+    except ImportError:
+        try:
+            from yr.sandbox import tunnel_client as _tc  # older akernel layout
+        except ImportError as exc:
+            # Warn rather than pass: a silent skip looks identical to "the
+            # gateway is happy with ws://" from the outside.
+            logger.warning("openyuanrong: tunnel scheme patch skipped, tunnel_client not importable (%s)", exc)
+            return
+
+    client = getattr(_tc, "TunnelClient", None)
+    if client is None:
+        logger.warning("openyuanrong: tunnel scheme patch skipped, %s has no TunnelClient", _tc.__name__)
+        return
+    if getattr(client.start, "_yr_wss_patched", False):
+        return  # already wrapped (import-time safe, idempotent)
+    _orig_start = client.start
+
+    def _start_wss(self: Any, tunnel_url: str, timeout: float | None = None) -> bool:  # noqa: ANN001
+        if tunnel_url.startswith("ws://"):
+            rest = tunnel_url[len("ws://") :]
+            if rest.split("/", 1)[0].endswith(":443"):
+                tunnel_url = "wss://" + rest
+                logger.debug("openyuanrong: tunnel URL upgraded to wss:// (TLS gateway)")
+        # Forward only what the caller passed, so each SDK keeps its own default.
+        if timeout is None:
+            return _orig_start(self, tunnel_url)
+        return _orig_start(self, tunnel_url, timeout=timeout)
+
+    _start_wss._yr_wss_patched = True
+    client.start = _start_wss
+    logger.debug("openyuanrong: %s.TunnelClient.start patched (wss:// upgrade for :443 gateways)", _tc.__name__)
+
+
 def _resolve_sandbox_name() -> str | None:
     """Return ``{prefix}{random}`` when ``SANDBOX_NAME_PREFIX`` env is set."""
     prefix = os.getenv("SANDBOX_NAME_PREFIX")
@@ -40,6 +89,10 @@ def _load_sdk() -> Any:
             "the openyuanrong sandbox provider requires the openYuanrong sandbox SDK; "
             "install it with: pip install openyuanrong-sandbox"
         ) from exc
+    # Patch here, not at module import: the SDK is only importable now, and this
+    # loader is the single choke point before ``sdk.Sandbox(...)`` builds the
+    # tunnel URL / opens the tunnel.
+    _patch_tunnel_scheme()
     return yr_sandbox
 
 
@@ -50,7 +103,9 @@ def _connection_config(sdk: Any) -> Any:
 
     * ``OPENYUANRONG_TLS`` → ``use_tls`` (SDK default ``True``)
     * ``OPENYUANRONG_GATEWAY_ADDRESS`` → ``gateway_address`` (SDK default ``None``)
-    * ``OPENYUANRONG_GATEWAY_TLS`` → ``gateway_use_tls`` (SDK default ``False``)
+    * ``OPENYUANRONG_GATEWAY_TLS`` → ``gateway_use_tls`` (falls back to
+      ``use_tls``; the raw SDK default ``False`` sends a plaintext ``ws://``
+      handshake to the TLS ingress port and the tunnel never routes)
     * ``OPENYUANRONG_TLS_VERIFY`` → ``verify_tls`` (SDK default ``False``)
     * ``OPENYUANRONG_TUNNEL_SSL_VERIFY`` → ``YR_TUNNEL_SSL_VERIFY`` (tunnel
       client default ``"1"``; process-env only, no ``ConnectionConfig`` field)
@@ -71,6 +126,11 @@ def _connection_config(sdk: Any) -> Any:
     gateway_tls = os.getenv("OPENYUANRONG_GATEWAY_TLS")
     if gateway_tls:
         kwargs["gateway_use_tls"] = gateway_tls != "0"
+    else:
+        # Mirror the SDK's ``use_tls`` default instead of its ``gateway_use_tls``
+        # one: the gateway scheme is what the reverse tunnel speaks, so it must
+        # follow the server TLS setting unless a deployment pins it explicitly.
+        kwargs["gateway_use_tls"] = kwargs.get("use_tls", True)
     tls_verify = os.getenv("OPENYUANRONG_TLS_VERIFY")
     if tls_verify:
         kwargs["verify_tls"] = tls_verify != "0"
