@@ -42,6 +42,15 @@ class KVCacheStore:
             Layer.CPU: {},
             Layer.SSD: {},
         }
+        # In-flight *held* blocks: replica_id → {block hash → ref count}. Unlike
+        # ``replicas_by_block`` (which says "this replica caches this block", i.e.
+        # it is resident and may be evicted), this says "an in-flight request has
+        # this block pinned" — the block cannot be evicted and the replica is
+        # really using it. The KV-event stream cannot maintain it: BlockStored
+        # carries no request identity, and "the request finished" has no event
+        # (BlockRemoved only fires once the block is actually evicted), so only
+        # the router's own acquire/release can. Same lock as the reverse index.
+        self._inflight_blocks: dict[str, dict[str, int]] = {}
         self._lock: threading.Lock = threading.Lock()
 
     @classmethod
@@ -70,6 +79,9 @@ class KVCacheStore:
                 del self.replicas_by_block[bh]
             for layer_counts in self._replica_layer_counts.values():
                 layer_counts.pop(replica_id, None)
+            # A removed replica holds nothing; its pins must not linger as a
+            # phantom in-flight load if it comes back.
+            self._inflight_blocks.pop(replica_id, None)
 
     # ── Block management ────────────────────────────────────────────────
 
@@ -102,6 +114,69 @@ class KVCacheStore:
                     replicas.discard(replica_id)
                     if not replicas:
                         del self.replicas_by_block[bh]
+
+    # ── In-flight block holding (pin / unpin) ───────────────────────────
+
+    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> int:
+        """Bump the ref count of every block an in-flight request holds.
+
+        Counts *before* incrementing: the return value is the number of blocks
+        that are neither already resident in this replica's prefix cache
+        (``cached_on``) nor already held by another in-flight request (``held``)
+        — i.e. exactly the blocks this dispatch has to allocate. Counting after
+        the increment would let the request's own pins hide its allocations.
+
+        Args:
+            replica_id: The replica the request was dispatched to.
+            hash_strs: The request's full-block chained prefix hashes (may be
+                empty when the block size is not yet learned or no prompt was
+                forwarded — then nothing is pinned).
+
+        Returns:
+            Number of newly allocated blocks (0 for an empty/full-hit prefix).
+        """
+        with self._lock:
+            held = self._inflight_blocks.setdefault(replica_id, {})
+            new_blocks = sum(1 for h in hash_strs if h not in held and not self._is_cached_locked(replica_id, h))
+            for h in hash_strs:
+                held[h] = held.get(h, 0) + 1
+            return new_blocks
+
+    def unpin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Drop one reference to every block a finishing request held.
+
+        A block leaves the held set only when its last holder releases it — a
+        shared prefix survives one of its two requests completing, which is
+        exactly the case a per-request token subtraction gets wrong.
+
+        Args:
+            replica_id: The replica the request was dispatched to.
+            hash_strs: The same hash list the request pinned at acquire.
+        """
+        with self._lock:
+            held = self._inflight_blocks.get(replica_id)
+            if not held:
+                return
+            for h in hash_strs:
+                ref_cnt = held.get(h, 0) - 1
+                if ref_cnt > 0:
+                    held[h] = ref_cnt
+                else:
+                    held.pop(h, None)
+
+    def inflight_block_count(self, replica_id: str) -> int:
+        """Return the number of distinct blocks currently held on ``replica_id``.
+
+        Absolute gauge (not a delta): a release that frees nothing (a shared
+        block) must not move it, which a signed delta cannot express.
+        """
+        with self._lock:
+            return len(self._inflight_blocks.get(replica_id, {}))
+
+    def _is_cached_locked(self, replica_id: str, hash_str: str) -> bool:
+        """Whether ``replica_id`` already caches ``hash_str``. Caller holds ``_lock``."""
+        cached = self.replicas_by_block.get(hash_str)
+        return cached is not None and replica_id in cached
 
     # ── Retained-cache size ─────────────────────────────────────────────
 
@@ -146,8 +221,7 @@ class KVCacheStore:
             return 0.0
         matched = 0
         for i, hs in enumerate(hash_strs):
-            cached = self.replicas_by_block.get(hs)
-            if cached is None or node_id not in cached:
+            if not self._is_cached_locked(node_id, hs):
                 break  # chain break — this node doesn't cache this hash
             matched = i + 1
         return matched / len(hash_strs)

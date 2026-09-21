@@ -54,6 +54,21 @@ class TestStickyEndToEnd:
         assert sid1 == sid2
 
     def test_overloaded_sticky_falls_back_to_healthy(self):
+        """Feature: bound replica becomes saturated (load>0.9) → rebind to a healthy one.
+        Description: turn1 binds r1→s0; then s0 saturated so load exceeds
+        ``load_threshold`` (0.9). load = 0.4·kv_load + 0.2·running/max +
+        0.1·waiting/max + 0.3·inflight/max with ``max_num_seqs=64``; to push past
+        0.9 every weighted term must contribute — in particular inflight (weight
+        0.3) must be >0, since with inflight=0 the kv+running+waiting ceiling is
+        0.7. Here s0: kv_load=1.0 (retained=10/num_gpu_blocks=10), running=64,
+        waiting=1000, inflight=64 → load=1.0; s1 healthy (kv_load=0 → load=0).
+        The capacity pool needs the same saturation in the router's OWN book
+        (``INFLIGHT_BLOCKS``, cap=10 blocks × 16 = 160): 10 held blocks leave
+        avail=0 < thresh=16, so s0 is filtered there too while s1 (avail=160) wins.
+        (Engine-side ``kv_perc``/retained load is what the sticky gate reads; the
+        capacity pool reads the router's dispatch book — both are saturated here.)
+        Expectation: turn2 routes to s1 (not the saturated s0), and rebinds r1→s1
+        """
         balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},
             _kv_metrics({"s0": {}, "s1": {}}),
@@ -63,7 +78,7 @@ class TestStickyEndToEnd:
             _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}})
         )
         balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
-        balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})
+        balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.INFLIGHT_BLOCKS: 10}})
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid2 == "s1"
 

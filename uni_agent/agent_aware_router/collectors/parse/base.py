@@ -83,12 +83,19 @@ class MetricsUpdate:
             store owns the running counter).
         request_id: Optional routing request id carried with the update
             (``None`` when the update isn't request-scoped).
+        prompt_ids: Input token ids of the acquiring request (empty when the
+            source forwarded none). Carried for the same reason as
+            ``request_id``: the collector — which owns the KV store — needs the
+            prompt to tell how much of it the target replica already caches, so
+            only the uncached remainder is booked as in-flight tokens. Ignored
+            by non-acquire updates.
     """
 
     node_id: str
     metrics: dict[str, Any]
     is_delta: bool = False
     request_id: str | None = None
+    prompt_ids: tuple[int, ...] = ()
 
 
 @dataclass
