@@ -263,14 +263,14 @@ class KVCAwareBalancer:
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
         """Release a server after a request completes; fires ``on_release``.
 
-        ``prompt_ids`` (the completing request's input token ids) mirror the value
-        passed at ``acquire_server`` time; ``len(prompt_ids)`` is forwarded as the
-        same ``prompt_len`` int that ``on_acquire`` produced, so the in-flight
-        token gauge is decremented by exactly what acquire added. ``request_id``
-        lets the inflight parser attribute the release to the right request (e.g.
-        to subtract its turn from the in-flight turn sum). Both default for
-        callers that do not track them (the token gauge simply stays unchanged on
-        release).
+        The release carries only ``request_id`` — verl #7115 has no prompt field
+        on release, so the collector folds the in-flight token gauge's negative
+        delta from what it booked under the same ``request_id`` at acquire time
+        (the uncached part of the prompt, symmetric by construction). The id also
+        lets the inflight parser attribute the release to the right request: it
+        is what subtracts the turn from the in-flight turn sum and locates that
+        booked token amount. It defaults to ``None`` for callers that do not
+        track it (the gauge then stays unchanged on release).
         """
         if self._inflight.get(server_id, 0) > 0:
             self._inflight[server_id] -= 1

@@ -28,8 +28,9 @@ from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
 from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
-from ..types import EmitKey, MetricKey
+from ..types import EmitKey, Layer, MetricKey
 from ..utils.knob import coerce_knob_value
+from ..utils.prefix_cache import resolve_prefix_hashes
 from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .transport.base import Transport
 
@@ -67,11 +68,12 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
     MetricKey.ESTIMATED_FLOPS_PER_GPU,
 )
 
-# Per-request bookkeeping key: prompt length recorded at dispatch. verl #7115
+# Per-request bookkeeping key: in-flight tokens recorded at dispatch (the
+# uncached part of the prompt, see ``_uncached_dispatch_tokens``). verl #7115
 # releases carry no token list, so the release-side ``INFLIGHT_TOKENS`` delta
 # is folded from this row — same acquire-record / release-consume shape as the
 # per-request "turn" counter below.
-_PROMPT_LEN_KEY = "prompt_len"
+_INFLIGHT_TOKENS_KEY = "inflight_tokens"
 
 
 def _avg(delta_sum: float, delta_cnt: float) -> float:
@@ -111,6 +113,10 @@ class Collector:
         self._kv_last_logged_total = 0
         # Last-emit time for the dispatched/completed/inflight_turn_sum snapshot (throttled).
         self._dispatch_last_log: float = 0.0
+        # Cumulative dispatch-time prompt tokens vs the uncached part of them —
+        # the realized prefix-cache hit the in-flight token gauge nets out.
+        # Logged with the dispatch snapshot (``router-inflight-tokens``).
+        self._inflight_token_sums: dict[str, int] = {"dispatched": 0, "uncached": 0}
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -206,10 +212,17 @@ class Collector:
         turn sum (``INFLIGHT_TURN_SUM``) and the release-side token delta
         (``INFLIGHT_TOKENS``) are folded into the same locked write from
         per-request rows recorded at dispatch — acquire records the request's
-        current turn and prompt length, release subtracts both (release changes
-        neither, so it subtracts what acquire recorded). verl #7115 releases
-        carry no token list, which is why the length lives in a per-request row
-        rather than the release event.
+        current turn and its in-flight token count, release subtracts both
+        (release changes neither, so it subtracts what acquire recorded).
+        verl #7115 releases carry no token list, which is why the count lives in
+        a per-request row rather than the release event.
+        On acquire the parser's raw ``prompt_len`` token delta is rewritten to
+        the *uncached* part of the prompt (see
+        :meth:`_uncached_dispatch_tokens`): tokens that already sit in the
+        chosen replica's prefix cache consume no new KV capacity, so booking
+        the whole prompt would overstate the in-flight footprint — by ~1.7x in
+        the measured 64x8 run, where kv usage ran well below inflight_tokens /
+        capacity.
         Both acquire and release refresh the throttled ``router-dispatch``
         snapshot. Absolute (non-delta) updates are polled gauges, handled
         below. When rl-insight emit is on, each write also builds a
@@ -226,12 +239,20 @@ class Collector:
             is_release = MetricKey.COMPLETED_COUNT in deltas
             if is_acquire:
                 if update.request_id is None:
-                    logger.debug("dispatch (DISPATCHED_COUNT) update missing request_id — skipping turn")
+                    logger.debug(
+                        "dispatch (DISPATCHED_COUNT) update missing request_id — "
+                        "skipping turn and cache-hit token rewrite (raw prompt_len booked)"
+                    )
                 else:
                     deltas[MetricKey.INFLIGHT_TURN_SUM] = self._data_store.incr_per_request(update.request_id, "turn")
-                    self._data_store.set_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
+                    raw_tokens = deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
+                    uncached = self._uncached_dispatch_tokens(
+                        update.node_id, update.request_id, update.prompt_ids, raw_tokens
                     )
+                    deltas[MetricKey.INFLIGHT_TOKENS] = uncached
+                    self._inflight_token_sums["dispatched"] += raw_tokens
+                    self._inflight_token_sums["uncached"] += uncached
+                    self._data_store.set_per_request(update.request_id, _INFLIGHT_TOKENS_KEY, uncached)
             elif is_release:
                 if update.request_id is None:
                     logger.debug(
@@ -242,7 +263,7 @@ class Collector:
                         update.request_id, "turn", 0
                     )
                     deltas[MetricKey.INFLIGHT_TOKENS] = -self._data_store.get_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, 0
+                        update.request_id, _INFLIGHT_TOKENS_KEY, 0
                     )
             new_values = self._data_store.incr_metrics(update.node_id, deltas)
             if is_acquire or is_release:
@@ -281,6 +302,36 @@ class Collector:
             for nid in self._data_store.get_metric_node_ids():
                 self._log_evidence_window(nid)
 
+    def _uncached_dispatch_tokens(
+        self,
+        node_id: str,
+        request_id: str | None,
+        prompt_ids: tuple[int, ...],
+        prompt_len: int | float,
+    ) -> int:
+        """Return ``prompt_len × (1 − gpu_hit)`` — the prefill this dispatch really adds.
+
+        A replica's prefix cache already holds some prefix of the incoming
+        prompt; those blocks consume no new KV capacity, so they must not count
+        as in-flight load. ``gpu_hit`` is the chain-walk hit rate of the chosen
+        replica over the prompt's full-block prefix hashes — the exact quantity
+        the capacity strategy scores with, and via the same ``request_id``
+        per-request memo, so this is an index walk rather than a re-hash.
+
+        Falls back to the raw ``prompt_len`` when there is nothing to subtract:
+        no ``prompt_ids`` forwarded, an unknown block size (hash chain
+        unresolvable), an empty chain, or a zero-length prompt. Erring on the
+        raw length keeps the gauge conservative (never books less than the true
+        footprint) and matches the pre-change behavior.
+        """
+        if not prompt_ids or prompt_len <= 0:
+            return int(prompt_len)
+        hash_strs = resolve_prefix_hashes(list(prompt_ids), request_id, self._data_store)
+        if not hash_strs:
+            return int(prompt_len)
+        gpu_hit = self._data_store.get_layer_prefix_hit_rate(node_id, hash_strs, Layer.GPU)
+        return int(round(prompt_len * (1.0 - gpu_hit)))
+
     def _write_sticky_update(self, update: StickyUpdate) -> None:
         """Apply a StickyUpdate to the per-request store (sticky key) via DataStore."""
         if update.action == "put":
@@ -316,6 +367,17 @@ class Collector:
             logger.info(
                 f"router-dispatch replica={rep} dispatched={dispatched} completed={completed} "
                 f"inflight_turn_sum={inflight_turn_sum} prompt_len_sum={prompt_len_sum}"
+            )
+        # What the INFLIGHT_TOKENS gauge books vs the raw dispatched prompt
+        # tokens: the gap is the prefix-cache hit the gauge nets out. Compare
+        # against vllm's own cached/prefill counters in the evidence log.
+        dispatched_tokens = self._inflight_token_sums["dispatched"]
+        if dispatched_tokens:
+            uncached_tokens = self._inflight_token_sums["uncached"]
+            logger.info(
+                f"router-inflight-tokens dispatched_prompt_tokens={dispatched_tokens} "
+                f"uncached_tokens={uncached_tokens} "
+                f"(dispatch-time gpu_hit={1.0 - uncached_tokens / dispatched_tokens:.3f})"
             )
 
     def _log_evidence_window(self, node_id: str) -> None:

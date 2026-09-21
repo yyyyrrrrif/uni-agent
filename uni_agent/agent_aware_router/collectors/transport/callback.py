@@ -56,6 +56,12 @@ class StatisticEvent:
             carry no token list, so the release-side token-gauge subtraction is
             folded by the collector from acquire-time per-request bookkeeping,
             not from this event.
+        prompt_ids: The acquiring request's input token ids (empty when the
+            caller forwarded none). Kept alongside ``prompt_len`` because the
+            in-flight token gauge books only the *uncached* part of the prompt,
+            and only the collector — which owns the KV store — can tell how much
+            of this prompt the chosen replica already caches. Set on
+            ``on_acquire`` only, same as ``prompt_len``.
     """
 
     event: str
@@ -63,6 +69,7 @@ class StatisticEvent:
     replica_id: str | None = None
     server_ids: tuple[str, ...] = ()
     prompt_len: int = 0
+    prompt_ids: tuple[int, ...] = ()
 
 
 class CallbackTransport(Transport):
@@ -98,6 +105,7 @@ class CallbackTransport(Transport):
                     request_id=request_id,
                     replica_id=chosen,
                     prompt_len=prompt_len,
+                    prompt_ids=tuple(prompt_ids) if prompt_ids else (),
                 ),
                 "",
             )

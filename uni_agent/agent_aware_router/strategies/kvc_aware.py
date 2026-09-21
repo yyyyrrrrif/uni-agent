@@ -429,9 +429,12 @@ class KVCacheAwareStrategy:
             remaining[i] = avail[i] - need[i]                    # free tokens after assign
             eligible[i]  = avail[i] >= cap × (1 - load_threshold)   # pure capacity gate
 
-        Cold start (no sticky binding) picks ``argmin(inflight_tokens)``; the
-        no-eligible pool falls back to all replicas; otherwise the eligible set
-        is used. Every pick goes through :meth:`_soft_pick`, so near-equal
+        Cold start (no sticky binding) picks ``argmin(inflight_tokens)`` — the
+        *uncached* in-flight token load, since the collector folds each dispatch
+        by ``plen × (1 − gpu_hit)``, so a replica re-reading a warm prefix does
+        not look loaded. The no-eligible pool falls back to all replicas;
+        otherwise the eligible set is used. Every pick goes through
+        :meth:`_soft_pick`, so near-equal
         values are resolved randomly inside the ``tie_tolerance`` band rather
         than by the strict most-extreme value (which is what lets the first
         wave of all-tied replicas collapse onto ``pool[0]``).

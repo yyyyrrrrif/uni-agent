@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import BLOCK_SIZE
 
 from uni_agent.agent_aware_router.collectors.parse import MetricsUpdate, StickyUpdate
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
@@ -87,6 +88,23 @@ class TestInflightParser:
         }
         assert upd.is_delta is True
         assert upd.request_id == "r1"  # carried so the collector attributes the dispatch's turn
+        assert upd.prompt_ids == ()  # no token list on the event → nothing to look up
+
+    def test_on_acquire_forwards_prompt_ids(self):
+        """The token list rides along so the collector can net out the cache hit."""
+        upd = InflightParser().parse(
+            StatisticEvent(
+                "on_acquire",
+                request_id="r1",
+                replica_id="s0",
+                prompt_len=3,
+                prompt_ids=(1, 2, 3),
+            ),
+            "",
+        )
+        assert isinstance(upd, MetricsUpdate)
+        assert upd.prompt_ids == (1, 2, 3)
+        assert upd.metrics[MetricKey.INFLIGHT_TOKENS] == 3  # raw until the collector rewrites it
 
     def test_on_release_emits_inflight_minus_completed_delta(self):
         upd = InflightParser().parse(StatisticEvent("on_release", replica_id="s0", request_id="r1"), "")
@@ -151,6 +169,17 @@ class TestCallbackTransport:
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0"),
             StatisticEvent("on_release", replica_id="s0"),
             StatisticEvent("on_servers_removed", server_ids=("s1", "s2")),
+        ]
+
+    def test_on_acquire_callback_forwards_prompt_ids(self):
+        balancer = _FakeBalancer()
+        transport = CallbackTransport(balancer)
+        received: list = []
+        _run(transport.subscribe(lambda raw, nid: received.append(raw)))
+
+        balancer.callbacks["on_acquire"][0]("r1", "s0", [7, 8, 9])
+        assert received == [
+            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_len=3, prompt_ids=(7, 8, 9)),
         ]
 
     def test_on_release_callback_forwards_request_id(self):
@@ -241,6 +270,82 @@ class TestCollectorCallbackIntegration:
             # prompt-len sum: s0 accumulates 3+10; s1 gets 0 (None prompt not forwarded)
             assert ds.get_metric("s0", MetricKey.PROMPT_LEN_SUM) == 13
             assert ds.get_metric("s1", MetricKey.PROMPT_LEN_SUM) == 0
+        finally:
+            collector.stop()
+
+    def test_acquire_books_uncached_tokens_and_release_subtracts_the_same(self):
+        """Feature: INFLIGHT_TOKENS nets out the chosen replica's prefix-cache hit.
+        Description: a 64-token prompt (4 blocks of 16) whose first two blocks
+          the replica already caches → gpu_hit 0.5. Acquire must book 32 tokens
+          (the uncached half), not 64; the release must subtract exactly that 32.
+        Expectation:
+          after acquire: INFLIGHT_TOKENS=32, PROMPT_LEN_SUM=64 (raw request size)
+          after release: INFLIGHT_TOKENS=0, COMPLETED_COUNT=1
+        """
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+        from uni_agent.agent_aware_router.store.data_store import DataStore
+        from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
+
+        prompt = list(range(4 * BLOCK_SIZE))
+        ds = DataStore()
+        ds.set_block_size(BLOCK_SIZE)
+        # Routing resolves the chain first (the strategy's per-request memo) —
+        # the collector reuses it. Only the first half of it is stored on s0.
+        chain = resolve_prefix_hashes(prompt, "r1", ds)
+        assert len(chain) == 4
+        ds.add_kv_blocks("s0", chain[:2])
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), InflightParser())
+        collector.start()
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 32  # 64 × (1 − 0.5)
+            assert ds.get_metric("s0", MetricKey.PROMPT_LEN_SUM) == 64  # evidence stays raw
+            assert ds.get_per_request("r1", "inflight_tokens", None) == 32
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
+        finally:
+            collector.stop()
+
+    def test_fully_cached_prompt_books_zero_inflight_tokens(self):
+        """A 100%-cached prompt adds no KV footprint → books 0 (release stays 0)."""
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+        from uni_agent.agent_aware_router.store.data_store import DataStore
+        from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
+
+        prompt = list(range(2 * BLOCK_SIZE))
+        ds = DataStore()
+        ds.set_block_size(BLOCK_SIZE)
+        chain = resolve_prefix_hashes(prompt, "r1", ds)
+        ds.add_kv_blocks("s0", chain)
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), InflightParser())
+        collector.start()
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0  # symmetric, not negative
+        finally:
+            collector.stop()
+
+    def test_missing_prompt_ids_or_block_size_falls_back_to_raw_len(self):
+        """No token list / no learned block size → no hit evidence → book raw plen."""
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+        from uni_agent.agent_aware_router.store.data_store import DataStore
+
+        ds = DataStore()  # block_size never learned → the chain is unresolvable
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), InflightParser())
+        collector.start()
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", list(range(64)))  # no block size
+            balancer.callbacks["on_acquire"][0]("r2", "s0", None)  # no prompt at all
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 64  # raw, not 0
         finally:
             collector.stop()
 
