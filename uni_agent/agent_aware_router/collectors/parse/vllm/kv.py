@@ -39,9 +39,19 @@ class VLLMKVParser(Parser):
     ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
 
     Attributes:
-        remote_to_local_block_hash: Mapping from vLLM remote block_hash
-            to locally-computed prefix hash (str).  Used for chained
-            hash computation.
+        remote_to_local_block_hash: **Per-replica** mapping
+            ``{node_id: {remote block_hash: local prefix hash}}``.  The chained
+            hash needs the parent's *local* hash, and a vLLM remote hash is
+            content-derived, so it looks identical on every replica while being
+            owned per replica: sharing one flat map let replica A's eviction pop
+            the entry replica B still needed, which silently dropped B's
+            ``BlockRemoved`` translation and orphaned its resident count
+            (design doc §5.3.6).
+        stats: Diagnostic counters for the two ways an event-side hash
+            translation can fail — ``removed_unmapped`` (removal folded to
+            nothing → ``retained`` drifts high) and ``parent_unresolved``
+            (chain restarted at ``seed`` → a duplicate local hash for one
+            physical block).  Both are surfaced by the collector tally.
         _block_size: Learned block size from first event.
     """
 
@@ -50,8 +60,13 @@ class VLLMKVParser(Parser):
     _MEDIUM_TO_LAYER: dict[str, Layer] = {"GPU": Layer.GPU, "cpu": Layer.CPU}
 
     def __init__(self) -> None:
-        self.remote_to_local_block_hash: dict[str, str] = {}
+        self.remote_to_local_block_hash: dict[str, dict[str, str]] = {}
+        self.stats: dict[str, int] = {"removed_unmapped": 0, "parent_unresolved": 0}
         self._block_size: int | None = None
+
+    def _node_map(self, node_id: str) -> dict[str, str]:
+        """Remote→local hash map for one replica (created on first event)."""
+        return self.remote_to_local_block_hash.setdefault(node_id, {})
 
     def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
         """Parse msgpack payload and return structured update command.
@@ -117,12 +132,17 @@ class VLLMKVParser(Parser):
             self._block_size = event.block_size
             update.set_block_size(event.block_size)
 
+        node_map = self._node_map(event.node_id)
         seed = 0
         local_parent_hash = seed
         if event.parent_block_hash is not None:
-            local_parent_str = self.remote_to_local_block_hash.get(event.parent_block_hash)
+            local_parent_str = node_map.get(event.parent_block_hash)
             if local_parent_str is not None:
                 local_parent_hash = int(local_parent_str)
+            else:
+                # Parent unknown (replay gap / earlier parse failure) → chain
+                # restarts at seed and this block gets a second local hash.
+                self.stats["parent_unresolved"] += 1
 
         local_hashes: list[str] = []
         for i, block_bytes in enumerate(event.token_ids):
@@ -135,19 +155,29 @@ class VLLMKVParser(Parser):
             )
             local_hash_str = str(local_hash_int)
             bh = event.block_hashes[i]
-            self.remote_to_local_block_hash[bh] = local_hash_str
+            node_map[bh] = local_hash_str
             local_hashes.append(local_hash_str)
             local_parent_hash = local_hash_int  # chain
 
         update.add(self._medium_to_layer(event.medium), local_hashes)
 
     def _on_block_removed(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
-        """Handle BlockRemoved: convert remote hashes to local, fold into update."""
-        local_hashes = [
-            self.remote_to_local_block_hash[bh] for bh in event.block_hashes if bh in self.remote_to_local_block_hash
-        ]
+        """Handle BlockRemoved: convert remote hashes to local, fold into update.
+
+        The lookup (and its ``pop``: a replica that dropped a block no longer
+        needs the mapping, which keeps the map bounded by the resident set) only
+        touches ``event.node_id``'s own map — see the class docstring.
+        """
+        node_map = self._node_map(event.node_id)
+        local_hashes: list[str] = []
         for bh in event.block_hashes:
-            self.remote_to_local_block_hash.pop(bh, None)
+            local_hash = node_map.pop(bh, None)
+            if local_hash is None:
+                # Unknown hash → the removal cannot be folded, so this replica's
+                # retained count keeps a block the engine already freed.
+                self.stats["removed_unmapped"] += 1
+                continue
+            local_hashes.append(local_hash)
 
         update.remove(self._medium_to_layer(event.medium), local_hashes)
 

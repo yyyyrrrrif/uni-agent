@@ -189,10 +189,14 @@ class Collector:
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
+            # Parser-side translation failures: non-zero means the event-side
+            # retained count is drifting above the engine's truth.
+            hash_map_stats = getattr(self._parser, "stats", None)
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._data_store.per_replica_block_counts()}"
+                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
+                f"hash-map={dict(hash_map_stats or {})}"
             )
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
