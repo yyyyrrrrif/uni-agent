@@ -204,6 +204,23 @@ class DataStore:
         """
         return self._kv.per_replica_block_counts()
 
+    # ── In-flight block pinning ─────────────────────────────────────────
+
+    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> int:
+        """Pin a dispatch's prefix blocks on a replica; return the newly allocated count.
+
+        Thin pass-through to ``KVCacheStore`` (see :meth:`KVCacheStore.pin_inflight_blocks`).
+        """
+        return self._kv.pin_inflight_blocks(replica_id, hash_strs)
+
+    def unpin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Release one reference to each block a finishing request held (block-level ref count)."""
+        self._kv.unpin_inflight_blocks(replica_id, hash_strs)
+
+    def inflight_block_count(self, replica_id: str) -> int:
+        """Number of distinct blocks currently pinned by in-flight requests on ``replica_id``."""
+        return self._kv.inflight_block_count(replica_id)
+
     # ── PerReplicaStore incremental write ──────────────────────────────────
 
     def incr_metric(self, node_id: str, key: str, delta: int | float = 1) -> int | float:

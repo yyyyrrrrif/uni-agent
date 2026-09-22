@@ -64,17 +64,30 @@ class MetricKey:
     ESTIMATED_FLOPS_PER_GPU: str = "estimated_flops_per_gpu"
     # In-flight request count (acquire +1 / release -1, mirrors verl least-inflight).
     INFLIGHT_COUNT: str = "inflight_count"
-    # In-flight *uncached* prompt tokens: acquire adds prompt_len × (1 - gpu_hit)
-    # of the chosen replica, release subtracts the same booked amount. The
-    # token-weighted sibling of INFLIGHT_COUNT: a single 30k-token request and a
-    # 100-token one both count as 1 inflight, but load the KV cache very
-    # differently — this gauge captures that. The prefix-cache hit is netted out
-    # because cached tokens already occupy KV blocks and add no new footprint
-    # (booking the raw length overstated the in-flight footprint ~1.7x in the
-    # measured 64x8 run). Releases carry no token list (verl #7115), so the
-    # collector folds the negative delta from its acquire-time per-request row —
-    # symmetric by construction.
+    # In-flight *newly allocated* prompt tokens: acquire adds the blocks this
+    # dispatch must allocate (neither resident in the chosen replica's prefix
+    # cache nor already pinned by another in-flight request) × block size;
+    # release subtracts the same booked amount. The token-weighted sibling of
+    # INFLIGHT_COUNT: a single 30k-token request and a 100-token one both count
+    # as 1 inflight, but load the KV cache very differently — this gauge captures
+    # that. The prefix-cache hit is netted out because cached tokens already
+    # occupy KV blocks and add no new footprint. Releases carry no token list
+    # (verl #7115), so the collector folds the negative delta from its
+    # acquire-time per-request row — symmetric by construction. Free capacity is
+    # reported by INFLIGHT_BLOCKS instead: this gauge is "what to allocate now",
+    # which is 0 for a fully-cached prompt whose blocks are still held.
     INFLIGHT_TOKENS: str = "inflight_tokens"
+    # In-flight *held* KV blocks per replica — the drain/free-capacity sibling of
+    # INFLIGHT_TOKENS. INFLIGHT_TOKENS answers "how many tokens does this dispatch
+    # newly allocate"; this answers "how many blocks do the in-flight requests
+    # currently pin" (deduplicated by block hash, ref-counted). Shared prefixes
+    # count once, and blocks a request *hit* in the prefix cache still count while
+    # that request holds them — neither is true of INFLIGHT_TOKENS. Maintained by
+    # the collector at acquire/release (pin/unpin in KVCacheStore) and written as
+    # an absolute gauge, so ``avail = cap - inflight_blocks × block_size`` is real
+    # occupancy rather than Σ new allocations. Prompt blocks only (no decode
+    # growth), so it stays a floor of the engine's used_gpu_blocks.
+    INFLIGHT_BLOCKS: str = "inflight_blocks"
     # In-flight turn sum (acquire += turn / release -= turn), per replica. The
     # numerator of inflight_avg_turn = in-flight turn sum / in-flight count — the
     # instantaneous "how many turns deep are the in-flight requests" level. acquire
@@ -194,7 +207,12 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
     MetricKey.INFLIGHT_TOKENS: {
         "default": 0,
         "value_type": int,
-        "describe": "In-flight uncached prompt tokens (acquire +plen×(1-gpu_hit) / release -same) — token load",
+        "describe": "In-flight newly-allocated prompt tokens (acquire +new blocks × block size / release -same)",
+    },
+    MetricKey.INFLIGHT_BLOCKS: {
+        "default": 0,
+        "value_type": int,
+        "describe": "In-flight held KV blocks per replica (dedup, ref-counted; absolute gauge) — free-capacity account",
     },
     MetricKey.INFLIGHT_TURN_SUM: {
         "default": 0,

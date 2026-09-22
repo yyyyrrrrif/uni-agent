@@ -402,8 +402,9 @@ class KVCacheAwareStrategy:
 
         ``num_gpu_blocks`` is a per-replica gauge (constant across replicas in
         practice); ``block_size`` is learned from the first KV event (defaults
-        to 16 if not yet seen). Returns 0 when unavailable, in which case the
-        caller falls back to least-inflight.
+        to 16 if not yet seen). Returns 0 when unavailable (first KV event has
+        not landed), in which case the caller ranks by in-flight request count —
+        the token account has no yardstick to compare against without ``cap``.
         """
         for node_id in store.get_metric_node_ids():
             nblk = store.get_metric(node_id, MetricKey.NUM_GPU_BLOCKS)
@@ -422,24 +423,41 @@ class KVCacheAwareStrategy:
         """Capacity-gated token routing (discrete: winner=STICKY_TOP_SCORE, rest 0).
 
         The load account is the router's **own** book, not the engine's polled
-        gauge: every dispatch books the *uncached* part of its prompt into
-        ``INFLIGHT_TOKENS`` and every release subtracts it again (collector:
-        ``plen × (1 − gpu_hit)``), so for each replica ``i``::
+        gauge: every dispatch *pins* the blocks its prompt occupies on the chosen
+        replica (``KVCacheStore.pin_inflight_blocks``) and releases unpin the same
+        set, ref-counted by block hash; the collector re-reads that pin table into
+        ``INFLIGHT_BLOCKS`` after every acquire and release. So for each replica
+        ``i``::
 
-            avail[i]     = cap - inflight_tokens[i]              # free capacity (tokens)
-            need[i]      = len(prompt_ids) × (1 - gpu_hit[i])    # prefill this req adds
-            remaining[i] = avail[i] - need[i]                    # free capacity after assign
-            eligible[i]  = avail[i] >= cap × (1 - load_threshold)   # pure capacity gate
+            avail[i]     = cap - inflight_blocks[i] × block_size   # free capacity (tokens)
+            need[i]      = len(prompt_ids) × (1 - gpu_hit[i])      # prefill this req adds
+            remaining[i] = avail[i] - need[i]                      # free capacity after assign
+            eligible[i]  = avail[i] >= cap × (1 - load_threshold)  # pure capacity gate
 
-        Why this account over ``cap × (1 - kv_cache_usage_perc)``: ``kv_perc`` is
-        polled (5 s stale, so a whole fan-out burst reads the same pre-burst
-        value) and running-only (an idle replica holding a full but evictable
-        cache reports 0.000). ``INFLIGHT_TOKENS`` instead moves at dispatch time,
-        is net of the confirmed prefix cache, and counts exactly the tokens that
-        will occupy new blocks. Its blind spot is decode growth — the gauge
-        carries prompt tokens only, so a replica whose in-flight requests
-        generate long outputs looks emptier than it is. ``kv_perc`` stays in the
-        logs below as the engine-side cross-check for that.
+        ``need`` stays the token estimate ``len(prompt_ids) × (1 - gpu_hit)`` — how
+        many prompt tokens this request has to recompute on that replica, i.e. the
+        prefill work assigning it there adds. It is deliberately *not* the block
+        count acquire books: that count would make ``remaining`` equal
+        ``cap - blocks in use after this lands``, which cancels out the prefill
+        term entirely (a shared prefix costs nothing in blocks wherever it is
+        shared) and leaves the ranking blind to how much work each candidate would
+        do. ``gpu_hit`` is the per-replica chain-walk hit rate, so ``need`` is the
+        hit-rate term of the ranking, while ``avail`` is the capacity term.
+
+        Why the held-block gauge over both ``cap × (1 - kv_cache_usage_perc)`` and
+        the earlier ``INFLIGHT_TOKENS`` sum: ``kv_perc`` is polled (5 s stale, so a
+        whole fan-out burst reads the same pre-burst value) and running-only (an
+        idle replica holding a full but evictable cache reports 0.000).
+        ``INFLIGHT_TOKENS`` moves at dispatch time but books what each request
+        *newly allocates*, which double-counts a shared prefix dispatched
+        concurrently and books nothing for a request whose prompt is fully
+        cached — yet that request still pins every one of those blocks. The pin
+        table de-duplicates by block hash and counts held blocks regardless of
+        whether they were a hit, so ``avail`` is occupancy rather than a sum of
+        past allocations. ``INFLIGHT_TOKENS`` stays in the logs below as the
+        cross-check. Blind spot: prompt blocks only — a replica whose in-flight
+        requests generate long outputs (decode growth) still looks emptier than
+        it is, which is what ``kv_perc`` covers in the logs.
 
         ``cap`` is the only yardstick that makes the token account comparable;
         before the first KV event lands (``cap == 0``) the ranking falls back to
@@ -453,14 +471,18 @@ class KVCacheAwareStrategy:
         """
         n = len(replicas)
         cap = self._total_token_capacity(store)
+        # Same default the capacity above falls back to, so the two stay in the
+        # same unit before the first KV event teaches the real block size.
+        block_size = store.get_block_size() or 16
         plen = len(prompt_ids) if prompt_ids else 0
         rows: list[dict] = []
         for replica in replicas:
             kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
             inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
             inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
+            inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0
             s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
-            avail = cap - inflight_tokens
+            avail = cap - inflight_blocks * block_size
             need = plen * (1.0 - gpu_hit)
             remaining = avail - need
             # Emit as fractions of capacity (default-bucket friendly); skip when cap unknown.
@@ -479,6 +501,7 @@ class KVCacheAwareStrategy:
                     "kv_perc": kv_perc,
                     "inflight": inflight,
                     "inflight_tokens": inflight_tokens,
+                    "inflight_blocks": inflight_blocks,
                     "gpu_hit": gpu_hit,
                     "s_cache": s_cache,
                     "avail": avail,
@@ -509,14 +532,15 @@ class KVCacheAwareStrategy:
                 f"gpu_hit={row['gpu_hit']:.3f} inflight={row['inflight']} "
                 f"avail={row['avail']:.0f} need={row['need']:.0f} "
                 f"max_num_batched_tokens={self._max_num_batched_tokens} inflight_tokens={row['inflight_tokens']:} "
+                f"inflight_blocks={row['inflight_blocks']} "
                 f"remaining={row['remaining']:.0f}{tag}"
             )
         winner = rows[top]["replica"].replica_id
         logger.info(
             f"score(): CAPACITY_TOKEN_AWARE winner={winner} "
             f"(avail={rows[top]['avail']:.0f}, need={rows[top]['need']:.0f}, "
-            f"remaining={rows[top]['remaining']:.0f}, inflight_tokens={rows[top]['inflight_tokens']}, "
-            f"kv_perc={rows[top]['kv_perc']:.3f})"
+            f"remaining={rows[top]['remaining']:.0f}, inflight_blocks={rows[top]['inflight_blocks']}, "
+            f"inflight_tokens={rows[top]['inflight_tokens']}, kv_perc={rows[top]['kv_perc']:.3f})"
         )
         # Per-replica capacity signal for the plot (mirrors route-load in prefix-load-aware).
         cap_loads = {row["replica"].replica_id: row["remaining"] for row in rows}

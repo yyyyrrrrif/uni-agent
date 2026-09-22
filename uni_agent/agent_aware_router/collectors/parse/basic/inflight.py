@@ -42,18 +42,19 @@ serializes only ``request_id`` on release), so the collector folds the negative
 ``INFLIGHT_TOKENS`` delta from its acquire-time per-request row —
 the same acquire-record / release-consume shape as the turn handling below.
 The parser emits the raw ``prompt_len`` and forwards ``prompt_ids``; the
-collector then rewrites that delta down to the *uncached* part of the prompt
-(``prompt_len × (1 − gpu_hit)`` of the chosen replica), because prompt tokens
-already resident in a replica's prefix cache occupy no new KV capacity. Only
-the collector can do this — the KV store lives there, and the hash chain it
-walks is the one the strategy already resolved for this ``request_id``.
+collector then rewrites that delta down to the blocks this dispatch must
+actually allocate — those neither resident in the chosen replica's prefix cache
+nor already pinned by another in-flight request, times the block size. Only the
+collector can do this — the KV store lives there, and the hash chain it walks is
+the one the strategy already resolved for this ``request_id``.
 
 Event → delta mapping:
 - ``on_acquire`` → ``INFLIGHT_COUNT``/``DISPATCHED_COUNT`` +1,
   ``PROMPT_LEN_SUM`` +``prompt_len`` (raw request size — cumulative evidence, not
   a load gauge), ``INFLIGHT_TOKENS`` as emitted +``prompt_len`` but then
-  rewritten by the collector to +uncached tokens, carrying ``request_id`` and
-  ``prompt_ids``.
+  rewritten by the collector to +newly-allocated tokens (blocks × block size),
+  carrying ``request_id`` and ``prompt_ids``. The dispatch also pins its prefix
+  blocks on the chosen replica, which is what ``INFLIGHT_BLOCKS`` reports.
 - ``on_release`` → ``INFLIGHT_COUNT`` -1, ``COMPLETED_COUNT`` +1, carrying
   ``request_id`` (the ``INFLIGHT_TOKENS`` subtraction is folded by the
   collector from acquire-time bookkeeping, not this event).

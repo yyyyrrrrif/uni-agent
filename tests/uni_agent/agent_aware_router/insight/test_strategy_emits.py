@@ -109,6 +109,7 @@ def test_capacity_token_aware_emits_capacity_fractions(recording):
                 MetricKey.NUM_GPU_BLOCKS: 100,
                 MetricKey.KV_CACHE_USAGE_PERC: 0.2,
                 MetricKey.INFLIGHT_TOKENS: 320,
+                MetricKey.INFLIGHT_BLOCKS: 20,  # 20 held blocks × 16 = 320 tokens
             }
         }
     )
@@ -116,8 +117,9 @@ def test_capacity_token_aware_emits_capacity_fractions(recording):
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
 
-    # cap = 100 blocks × 16 = 1600 tokens; avail = cap − inflight_tokens = 1280 → ratio 0.8.
-    # (kv_perc is logged but never enters the capacity account.)
+    # cap = 100 blocks × 16 = 1600 tokens; avail = cap − inflight_blocks × block_size
+    # = 1600 − 20×16 = 1280 → ratio 0.8. (kv_perc and INFLIGHT_TOKENS are logged but
+    # never enter the capacity account.)
     # Components are emitted as fractions of capacity (default-bucket friendly).
     assert {"avail_ratio", "need_ratio", "remaining_ratio"} <= _names(recording, "histogram")
     avail_call = next(c for c in recording.calls if c[1] == "avail_ratio")
