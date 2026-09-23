@@ -569,9 +569,12 @@ class TestInflightBlockPin:
         Feature: re-acquire detects the stale pin marker, unpins first, and nets
           the still-booked raw tokens out of the new acquire.
         Description: r1 acquires the same prompt twice, with no release between
-          (a lost COMPLETED_COUNT), then releases once.
-        Expectation: a WARNING is logged; ``INFLIGHT_BLOCKS`` = 4 (not 8) and
-          ``INFLIGHT_TOKENS`` returns to 0 after the single release.
+          (a lost COMPLETED_COUNT), then releases once. The first acquire also
+          recorded those blocks as resident on s0, so the re-dispatch's
+          resident record is a no-op (the recorded counter stays put).
+        Expectation: a WARNING is logged; ``INFLIGHT_BLOCKS`` = 4 (not 8), the
+          stale raw booking stays netted out (not doubled), and ``INFLIGHT_TOKENS``
+          returns to 0 after the single release.
         """
         from uni_agent.agent_aware_router.collectors import collector as collector_module
 
@@ -585,6 +588,9 @@ class TestInflightBlockPin:
 
             assert any("re-acquire without release" in w for w in warnings), warnings
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
+            # Raw booking, netted: the re-dispatch re-books its raw prompt len
+            # but the stale booking is subtracted from the delta, so the gauge
+            # stays at one prompt's worth (not doubled).
             assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE
 
             balancer.callbacks["on_release"][0]("s0", "r1")
@@ -645,6 +651,64 @@ class TestInflightBlockPin:
             balancer.callbacks["on_release"][0]("s0", "r2")
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
             assert route(strat, prompt, ds, replicas, "r2")[0] == "s0"
+        finally:
+            collector.stop()
+
+    def test_acquire_records_the_prefix_as_resident_without_kv_events(self):
+        """Acquire alone makes the prefix a gpu_hit on the chosen replica.
+
+        Feature: ``record_dispatch_blocks`` (knob on by default) writes the
+          request's own chained prefix hashes into the resident index, so
+          ``gpu_hit`` / ``kv_cache_load`` no longer trail the kv-event stream.
+        Description: a 4-block prompt dispatches to s0; no BlockStored event is
+          ever delivered.
+        Expectation: s0's hit rate for that chain goes 0.0 → 1.0, the retained
+          count is 4, and the collector's own counter reports the 4 blocks it
+          wrote.
+        """
+        from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
+
+        prompt = list(range(4 * BLOCK_SIZE))
+        collector, balancer, ds = self._start()
+        try:
+            chain = resolve_prefix_hashes(prompt, None, ds)
+            assert ds.get_layer_prefix_hit_rate("s0", chain) == 0.0
+
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+
+            assert ds.get_layer_prefix_hit_rate("s0", chain) == 1.0
+            assert ds.per_replica_block_counts() == {"s0": 4}
+            assert collector._dispatch_recorded_blocks == 4
+        finally:
+            collector.stop()
+
+    def test_sequential_same_prefix_stays_resident_after_release(self):
+        """A finished request's prefix stays resident for the next dispatch.
+
+        Feature: the resident record survives release (only the engine's
+          eviction removes it) — the sequential counterpart of the concurrent
+        shared-prefix case.
+        Description: r1 acquires and releases a 4-block prompt on s0 with no
+          engine event ever arriving; r2 then dispatches the same prompt to s0.
+        Expectation: r1's held gauge returns to 0 on release while the resident
+          record survives (retained count stays 4); r2 books its raw prompt
+          tokens again and holds all 4 blocks, and the recorded counter does
+          not grow (r2's resident record is a no-op).
+        """
+        prompt = list(range(4 * BLOCK_SIZE))
+        collector, balancer, ds = self._start()
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
+            assert ds.per_replica_block_counts() == {"s0": 4}  # resident survives release
+
+            balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE  # raw booking
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4  # still held
+            assert collector._dispatch_recorded_blocks == 4  # r2's record is a no-op
         finally:
             collector.stop()
 

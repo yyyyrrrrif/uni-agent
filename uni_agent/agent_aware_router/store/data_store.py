@@ -123,6 +123,23 @@ class DataStore:
         """
         self._kv.add_blocks(node_id, block_hashes, layer=layer)
 
+    def record_dispatch_blocks(self, node_id: str, block_hashes: list[str]) -> int:
+        """Mark a dispatched request's prefix blocks resident on a node (GPU).
+
+        Router-side counterpart of ``add_kv_blocks``: the acquire path already
+        knows the prompt's block hashes, so the resident index learns them
+        immediately instead of waiting for the engine's kv-events. Idempotent
+        against the ``BlockStored`` the engine sends later.
+
+        Args:
+            node_id: The replica the request was dispatched to.
+            block_hashes: The request's full-block chained prefix hashes.
+
+        Returns:
+            Number of blocks this call newly made resident (0 for a full hit).
+        """
+        return self._kv.record_dispatch_blocks(node_id, block_hashes)
+
     def remove_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Remove KV cache blocks from a node.
 

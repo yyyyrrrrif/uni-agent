@@ -118,6 +118,10 @@ class Collector:
         self._kv_last_logged_total = 0
         # Last-emit time for the dispatched/completed/inflight_turn_sum snapshot (throttled).
         self._dispatch_last_log: float = 0.0
+        # Resident blocks the router wrote itself at acquire
+        # (``record_dispatch_blocks``) — the part of the resident index that did
+        # not wait for the engine's kv-events.
+        self._dispatch_recorded_blocks: int = 0
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -324,10 +328,13 @@ class Collector:
         hash chain (memoized by :func:`resolve_prefix_hashes` at acquire) is
         pinned ref-counted by block hash, and the absolute ``INFLIGHT_BLOCKS``
         gauge is refreshed right after — that gauge, not the token ledger, is
-        what the capacity strategy turns into free capacity. Skipped when there
-        is nothing to pin: no ``prompt_ids`` forwarded, a block size that is not
-        learned yet (the chain is unresolvable), or an empty chain — the held
-        gauge then cannot see this dispatch (prompt blocks only, no decode
+        what the capacity strategy turns into free capacity. The same chain is
+        also recorded into the resident index (``record_dispatch_blocks``) so
+        ``gpu_hit`` / ``kv_cache_load`` see the prefix at once instead of
+        trailing the engine's kv-event stream by a fan-out wave. Skipped when
+        there is nothing to pin: no ``prompt_ids`` forwarded, a block size that
+        is not learned yet (the chain is unresolvable), or an empty chain — the
+        held gauge then cannot see this dispatch (prompt blocks only, no decode
         growth).
         """
         block_size = self._data_store.get_block_size()
@@ -337,6 +344,9 @@ class Collector:
         if not hash_strs:
             return
         self._data_store.pin_inflight_blocks(node_id, hash_strs)
+        # Resident record runs *after* the pin, on the same chain; idempotent
+        # against the engine's later ``BlockStored`` for the same hashes.
+        self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(node_id, hash_strs)
         self._data_store.set_per_request(request_id, _INFLIGHT_BLOCK_PIN_KEY, node_id)
         self._refresh_inflight_blocks(node_id)
 
