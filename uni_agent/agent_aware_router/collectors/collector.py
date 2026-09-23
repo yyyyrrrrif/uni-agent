@@ -127,6 +127,10 @@ class Collector:
         # unknown): nothing was pinned, so their capacity is invisible in the
         # held-block account. Counted rather than silently dropped.
         self._unaccounted_dispatches: int = 0
+        # Resident blocks the router wrote itself at acquire
+        # (``record_dispatch_blocks``) — the part of the resident index that did
+        # not wait for the engine's kv-events.
+        self._dispatch_recorded_blocks: int = 0
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -366,6 +370,10 @@ class Collector:
         if not hash_strs:
             return int(raw_tokens), []
         new_blocks = self._data_store.pin_inflight_blocks(node_id, hash_strs)
+        # Resident record runs *after* the pin: pin must see the pre-dispatch
+        # state, otherwise this request's own blocks would count as already
+        # cached and its whole prefill booking would vanish.
+        self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(node_id, hash_strs)
         return new_blocks * int(block_size), hash_strs
 
     def _release_inflight_blocks(self, node_id: str, request_id: str) -> None:
@@ -460,7 +468,8 @@ class Collector:
             logger.info(
                 f"router-inflight-tokens dispatched_prompt_tokens={dispatched_tokens} "
                 f"uncached_tokens={uncached_tokens} (dispatch-time gpu_hit={hit}) "
-                f"unaccounted_dispatches={self._unaccounted_dispatches}"
+                f"unaccounted_dispatches={self._unaccounted_dispatches} "
+                f"recorded_blocks={self._dispatch_recorded_blocks}"
             )
 
     def _log_evidence_window(self, node_id: str) -> None:

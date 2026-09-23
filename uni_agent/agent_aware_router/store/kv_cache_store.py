@@ -89,31 +89,87 @@ class KVCacheStore:
         """Add blocks to a replica at a layer, updating the reverse index.
 
         Only GPU blocks are indexed in ``replicas_by_block`` (they drive
-        prefix-hit routing); CPU/SSD blocks are counted only.
+        prefix-hit routing); CPU/SSD blocks are counted only. GPU adds are
+        idempotent: a block already resident on the replica is a no-op, so the
+        retained count stays the reverse index's set cardinality
+        (``retained[rep] == |{bh : rep in replicas_by_block[bh]}|``) even when
+        the engine re-announces a block it stored before.
         """
         with self._lock:
-            layer_counts = self._replica_layer_counts.setdefault(layer, {})
-            for bh in block_hashes:
-                layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
-                if layer != Layer.GPU:
-                    continue
-                if bh not in self.replicas_by_block:
-                    self.replicas_by_block[bh] = set()
-                self.replicas_by_block[bh].add(replica_id)
+            self._add_blocks_locked(replica_id, block_hashes, layer)
+
+    def record_dispatch_blocks(self, replica_id: str, hash_strs: list[str]) -> int:
+        """Mark a dispatched request's prefix blocks *resident* on ``replica_id`` (GPU).
+
+        Called by the router's own acquire path: the request's full-block prefix
+        hashes (``resolve_prefix_hashes``) are about to be computed and cached by
+        the engine on this replica, so the resident index can learn them now
+        instead of waiting for the kv-event stream (which lags a fan-out wave and
+        makes ``gpu_hit`` look binary). Resident, not *held*: the blocks stay
+        indexed after release and leave only when the engine evicts them
+        (``BlockRemoved`` → :meth:`remove_blocks`).
+
+        Idempotent, and safe against the engine's later ``BlockStored`` for the
+        same hashes — that event becomes a no-op for the index and the count.
+
+        Args:
+            replica_id: The replica the request was dispatched to.
+            hash_strs: The request's full-block chained prefix hashes (empty is
+                a no-op).
+
+        Returns:
+            Number of blocks this call newly made resident (0 for a full hit).
+        """
+        if not hash_strs:
+            return 0
+        with self._lock:
+            return self._add_blocks_locked(replica_id, hash_strs, Layer.GPU)
 
     def remove_blocks(self, replica_id: str, block_hashes: Iterable[str], layer: Layer = Layer.GPU) -> None:
-        """Remove blocks from a replica at a layer, updating the reverse index."""
+        """Remove blocks from a replica at a layer, updating the reverse index.
+
+        Symmetric to :meth:`add_blocks`: a GPU block that is not resident on the
+        replica is a no-op, so a removal for a block this replica never had
+        (unmapped/duplicate engine event) cannot decrement the retained count
+        below the reverse index's truth.
+        """
         with self._lock:
-            layer_counts = self._replica_layer_counts.setdefault(layer, {})
-            for bh in block_hashes:
-                layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
-                if layer != Layer.GPU:
-                    continue
+            self._remove_blocks_locked(replica_id, block_hashes, layer)
+
+    def _add_blocks_locked(self, replica_id: str, block_hashes: Iterable[str], layer: Layer) -> int:
+        """Index + count blocks. Caller holds ``_lock``; returns the blocks added.
+
+        GPU counting is transition-based (see :meth:`add_blocks`); CPU/SSD blocks
+        have no reverse index to test against, so they keep the historical
+        unconditional count — a known limitation, not an oversight.
+        """
+        layer_counts = self._replica_layer_counts.setdefault(layer, {})
+        added = 0
+        for bh in block_hashes:
+            if layer == Layer.GPU:
                 replicas = self.replicas_by_block.get(bh)
                 if replicas is not None and replica_id in replicas:
-                    replicas.discard(replica_id)
-                    if not replicas:
-                        del self.replicas_by_block[bh]
+                    continue  # already resident — idempotent, never double-count
+                if replicas is None:
+                    self.replicas_by_block[bh] = {replica_id}
+                else:
+                    replicas.add(replica_id)
+            layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
+            added += 1
+        return added
+
+    def _remove_blocks_locked(self, replica_id: str, block_hashes: Iterable[str], layer: Layer) -> None:
+        """Un-index + uncount blocks. Caller holds ``_lock`` (see :meth:`remove_blocks`)."""
+        layer_counts = self._replica_layer_counts.setdefault(layer, {})
+        for bh in block_hashes:
+            if layer == Layer.GPU:
+                replicas = self.replicas_by_block.get(bh)
+                if replicas is None or replica_id not in replicas:
+                    continue  # not resident — never decrement into the negative
+                replicas.discard(replica_id)
+                if not replicas:
+                    del self.replicas_by_block[bh]
+            layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
 
     # ── In-flight block holding (pin / unpin) ───────────────────────────
 
