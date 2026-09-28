@@ -55,6 +55,7 @@ DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
     "overload_mode": OverloadMode.KV_CACHE_USAGE_PERC,
     "tie_tolerance": 0.05,
     "seed": None,
+    "capacity_threshold": 0.9,
 }
 
 
@@ -73,6 +74,7 @@ class KVCacheAwareStrategy:
         *,
         alpha: float,
         load_threshold: float,
+        capacity_threshold: float = 0.9,
         layer_weights: dict[Layer, float],
         do_shortcut: bool = True,
         slow_cut: SlowCut | str = SlowCut.CAPACITY_TOKEN_AWARE,
@@ -85,6 +87,8 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
         if not 0 < load_threshold < 1:
             raise StrategyError(f"load_threshold must be in (0, 1), got {load_threshold}")
+        if not 0 < capacity_threshold < 1:
+            raise StrategyError(f"capacity_threshold must be in (0, 1), got {capacity_threshold}")
         _valid_layers = {Layer.GPU, Layer.CPU, Layer.SSD}
         if set(layer_weights.keys()) != _valid_layers:
             raise StrategyError(f"layer_weights keys must be {_valid_layers}, got {set(layer_weights.keys())}")
@@ -117,6 +121,7 @@ class KVCacheAwareStrategy:
 
         self.alpha = float(alpha)
         self.load_threshold = float(load_threshold)
+        self.capacity_threshold = float(capacity_threshold)
         self.layer_weights = dict(layer_weights)
         self.do_shortcut = do_shortcut
         self.slow_cut = slow_cut
@@ -129,7 +134,8 @@ class KVCacheAwareStrategy:
         self._max_num_batched_tokens: int | None = None
         logger.info(
             f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, "
-            f"load_threshold={self.load_threshold:.2f}, load_weights={self.load_weights}, "
+            f"load_threshold={self.load_threshold:.2f}, capacity_threshold={self.capacity_threshold:.2f}, "
+            f"load_weights={self.load_weights}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
             f"tie_tolerance={self.tie_tolerance:.3f}, seed={self._seed}"
@@ -138,6 +144,7 @@ class KVCacheAwareStrategy:
     def __repr__(self) -> str:
         return (
             f"KVCacheAwareStrategy(alpha={self.alpha}, load_threshold={self.load_threshold}, "
+            f"capacity_threshold={self.capacity_threshold}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
             f"tie_tolerance={self.tie_tolerance}, seed={self._seed})"
@@ -177,6 +184,7 @@ class KVCacheAwareStrategy:
         return cls(
             alpha=kwargs["alpha"],
             load_threshold=cfg.load_threshold,
+            capacity_threshold=kwargs["capacity_threshold"],
             layer_weights=kwargs["layer_weights"],
             do_shortcut=kwargs["do_shortcut"],
             slow_cut=kwargs["slow_cut"],
@@ -424,8 +432,8 @@ class KVCacheAwareStrategy:
 
             avail[i]     = cap - inflight_blocks[i] × block_size   # free capacity (tokens)
             need[i]      = len(prompt_ids) × (1 - gpu_hit[i])      # prefill this req adds
-            remaining[i] = avail[i] - need[i]                      # free capacity after assign
-            eligible[i]  = avail[i] >= cap × (1 - load_threshold)  # pure capacity gate
+            remaining[i] = avail[i] - need[i]                      # free capacity after assignxw
+            eligible[i]  = avail[i] >= cap × (1 - capacity_threshold)   # pure capacity gate
 
         ``need`` stays the token estimate ``len(prompt_ids) × (1 - gpu_hit)`` — how
         many prompt tokens this request has to recompute on that replica, i.e. the
@@ -508,7 +516,7 @@ class KVCacheAwareStrategy:
             top = self._soft_pick([rows[i]["inflight"] for i in range(n)], maximize=False, tolerance=0)
             logger.info("score(): CAPACITY_TOKEN_AWARE cap unknown → soft-pick min inflight")
         else:
-            thresh = cap * (1.0 - self.load_threshold)
+            thresh = cap * (1.0 - self.capacity_threshold)
             eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
             pool = eligible or list(range(n))
             top = pool[

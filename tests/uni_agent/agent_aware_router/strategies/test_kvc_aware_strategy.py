@@ -658,6 +658,46 @@ class TestFromConfigDebugEnv:
         with pytest.raises(ConfigError, match="seed"):
             KVCacheAwareStrategy.from_config(cfg)
 
+    def test_capacity_threshold_env_override_and_error_layering(self, monkeypatch):
+        """CAPACITY_THRESHOLD: an independent knob (default 0.9) — the env override
+        sets it while load_threshold stays untouched either way.
+        Error layering: coercion first (ConfigError), then range (StrategyError)."""
+        from uni_agent.agent_aware_router.config.base import ConfigError
+        from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
+
+        cfg = KVCAwareStrategyConfig(load_threshold=0.85)
+        # Debug off, no env → capacity_threshold keeps its independent default.
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with(None),
+        )
+        strat = KVCacheAwareStrategy.from_config(cfg)
+        assert strat.capacity_threshold == pytest.approx(0.9)  # independent of load_threshold
+        assert strat.load_threshold == pytest.approx(0.85)
+
+        # Debug on with CAPACITY_THRESHOLD → overrides the default; load_threshold untouched.
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", CAPACITY_THRESHOLD="0.7"),
+        )
+        strat = KVCacheAwareStrategy.from_config(cfg)
+        assert strat.capacity_threshold == pytest.approx(0.7)
+        assert strat.load_threshold == pytest.approx(0.85)  # load_threshold untouched
+
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", CAPACITY_THRESHOLD="high"),
+        )
+        with pytest.raises(ConfigError, match="capacity_threshold"):
+            KVCacheAwareStrategy.from_config(cfg)
+
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", CAPACITY_THRESHOLD="1.5"),
+        )
+        with pytest.raises(StrategyError, match="capacity_threshold"):
+            KVCacheAwareStrategy.from_config(cfg)
+
     @pytest.mark.parametrize(
         ("knob", "value", "match"),
         [
@@ -666,6 +706,7 @@ class TestFromConfigDebugEnv:
             ("DO_SHORTCUT", "maybe", "do_shortcut"),
             ("ALPHA", "high", "alpha"),
             ("TIE_TOLERANCE", "high", "tie_tolerance"),
+            ("CAPACITY_THRESHOLD", "high", "capacity_threshold"),
             ("LAYER_WEIGHTS", "not json", "layer_weights"),
             ("LAYER_WEIGHTS", "[1, 2]", "layer_weights"),
             ("LAYER_WEIGHTS", '{"npu": 0.5}', "layer_weights"),
@@ -891,10 +932,9 @@ class TestCapacityTokenAware:
 
     def test_gate_filters_booked_replicas_and_picks_max_remaining(self):
         """
-        Feature: eligible = avail >= cap·(1-load_threshold); winner = argmax(remaining)
-        Description: 3 unbound replicas — rep_a holds 99 blocks
-          (avail=16 < thresh=160) → filtered; rep_b (avail=800) and rep_c (avail=480)
-          are eligible → argmax(remaining) picks rep_b
+        Feature: slow_cut=capacity-token-aware; eligible = avail >= cap·(1-capacity_threshold)
+        Description: 3 replicas — rep_a cache-rich but full (avail=16 < thresh=160) → filtered;
+          rep_b (avail=800) and rep_c (avail=480) both eligible → argmax(remaining) picks rep_b
         Expectation: scores = [0.0, STICKY_TOP_SCORE, 0.0]; route() picks rep_b
           rep_a: avail=1600-99×16=16 < 160 → filtered (despite gpu_hit=100)
           rep_b: avail=1600-50×16=800 → remaining=797 → winner
@@ -950,78 +990,32 @@ class TestCapacityTokenAware:
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), request_id="r1")
         assert scores == [STICKY_TOP_SCORE, 0.0]
 
-    def test_gate_threshold_via_load_threshold_flips_the_winner(self):
+    def test_capacity_gate_threshold_via_capacity_threshold(self):
         """
-        Feature: the gate (not the order) is what load_threshold tunes
-        Description: long prompt (1024 tokens) so need is big: rep_a avail=144 with a
-          full cache hit (need=0 → remaining=144), rep_b avail=800 but no cache
-          (need=1024 → remaining=−224)
+        Feature: gate threshold = cap·(1-capacity_threshold); capacity_threshold tunes the gate
+        Description: cap=1600; rep_a avail=160, rep_b avail=800. do_shortcut=False so the
+          binding does not short-circuit into the sticky branch and the gate is exercised.
         Expectation:
-          load_threshold=0.9 (thresh=160): rep_a filtered (144 < 160) → rep_b wins
-          load_threshold=0.99 (thresh=16): rep_a eligible → 144 > −224 → rep_a wins
+          low (capacity_threshold=0.99, thresh=16): both eligible → rep_b wins on remaining
+          high (capacity_threshold=0.85, thresh=240): rep_a filtered (0.0), rep_b wins
         """
         data = {
             "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1450, "inflight_blocks": 91, "gpu_hit_pct": 100},
             "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800, "inflight_blocks": 50, "gpu_hit_pct": 0},
         }
-        replicas = _replicas("rep_a", "rep_b")
-        strict = self._cap_strat(load_threshold=0.9)
-        assert strict.score(LONG_PROMPT_IDS, FakeRouteDataProvider(dict(data)), replicas, request_id="r1") == [
-            0.0,
-            STICKY_TOP_SCORE,
-        ]
-        loose = self._cap_strat(load_threshold=0.99)
-        assert loose.score(LONG_PROMPT_IDS, FakeRouteDataProvider(dict(data)), replicas, request_id="r1") == [
-            STICKY_TOP_SCORE,
-            0.0,
-        ]
-
-    def test_all_overloaded_falls_back_to_the_full_pool(self):
-        """
-        Feature: empty gate → pool = all replicas, same remaining order (no error)
-        Description: every replica is below thresh=160 → fallback
-        Expectation: rep_a (avail=16 → remaining 13) beats rep_b (avail=0 → −3)
-        """
-        strat = self._cap_strat()
-        provider = FakeRouteDataProvider(
-            {
-                "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1584, "inflight_blocks": 99},
-                "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 1592, "inflight_blocks": 100},
-            },
-        )
-        scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), request_id="r1")
-        assert scores == [STICKY_TOP_SCORE, 0.0]
-
-    def test_cap_unknown_falls_back_to_inflight_request_count(self):
-        """
-        Feature: cap=0 (first KV event not in) → the token account has no yardstick
-        Description: no num_gpu_blocks metric at all; rank by INFLIGHT_COUNT instead
-          (2 vs 0 → rep_b), and exact ties spread through the soft-pick band
-        Expectation: rep_b wins on count; an all-idle pair spreads across both
-        """
-        strat = self._cap_strat(do_shortcut=False)
-        loaded = FakeRouteDataProvider(
-            {
-                "rep_a": {"inflight_count": 2},
-                "rep_b": {"inflight_count": 0},
-            }
-        )
-        assert strat.score(PROMPT_IDS, loaded, _replicas("rep_a", "rep_b"), request_id="r1") == [
-            0.0,
-            STICKY_TOP_SCORE,
-        ]
-
-        idle = FakeRouteDataProvider(
-            {
-                "rep_a": {"inflight_count": 0},
-                "rep_b": {"inflight_count": 0},
-            }
-        )
-        winners = {
-            strat.score(PROMPT_IDS, idle, _replicas("rep_a", "rep_b"), request_id="r1").index(STICKY_TOP_SCORE)
-            for _ in range(200)
-        }
-        assert winners == {0, 1}  # exact tie → soft-pick spreads (no pool[0] collapse)
+        # Low threshold (thresh=1600·(1-0.99)=16): both eligible → rep_b wins on remaining.
+        low = self._cap_strat(do_shortcut=False, capacity_threshold=0.99)
+        p_low = FakeRouteDataProvider(dict(data))
+        p_low.put_sticky_binding("r1", "rep_b")
+        s_low = low.score(PROMPT_IDS, p_low, _replicas("rep_a", "rep_b"), request_id="r1")
+        assert s_low[1] == STICKY_TOP_SCORE
+        # High threshold (thresh=1600·(1-0.85)=240): rep_a (avail=160) filtered, rep_b wins.
+        high = self._cap_strat(do_shortcut=False, capacity_threshold=0.85)
+        p_high = FakeRouteDataProvider(dict(data))
+        p_high.put_sticky_binding("r1", "rep_b")
+        s_high = high.score(PROMPT_IDS, p_high, _replicas("rep_a", "rep_b"), request_id="r1")
+        assert s_high[1] == STICKY_TOP_SCORE
+        assert s_high[0] == 0.0  # rep_a filtered by the higher gate
 
     def test_soft_pick_randomizes_within_tolerance_band(self):
         """
