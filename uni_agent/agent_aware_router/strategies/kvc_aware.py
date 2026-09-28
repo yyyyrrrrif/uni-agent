@@ -52,6 +52,7 @@ DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
     "slow_cut": SlowCut.CAPACITY_TOKEN_AWARE,
     "overload_mode": OverloadMode.KV_CACHE_USAGE_PERC,
     "tie_tolerance": 0.05,
+    "capacity_threshold": 0.9,
 }
 
 
@@ -70,6 +71,7 @@ class KVCacheAwareStrategy:
         *,
         alpha: float,
         load_threshold: float,
+        capacity_threshold: float | None = None,
         layer_weights: dict[Layer, float],
         memory_overload_filter: bool = True,
         do_shortcut: bool = True,
@@ -82,6 +84,8 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
         if not 0 < load_threshold < 1:
             raise StrategyError(f"load_threshold must be in (0, 1), got {load_threshold}")
+        if capacity_threshold is not None and not 0 < capacity_threshold < 1:
+            raise StrategyError(f"capacity_threshold must be in (0, 1), got {capacity_threshold}")
         _valid_layers = {Layer.GPU, Layer.CPU, Layer.SSD}
         if set(layer_weights.keys()) != _valid_layers:
             raise StrategyError(f"layer_weights keys must be {_valid_layers}, got {set(layer_weights.keys())}")
@@ -114,6 +118,9 @@ class KVCacheAwareStrategy:
 
         self.alpha = float(alpha)
         self.load_threshold = float(load_threshold)
+        # Capacity gate threshold — None follows load_threshold so the gate and
+        # the sticky overload check stay coupled until explicitly split.
+        self.capacity_threshold = float(capacity_threshold) if capacity_threshold is not None else self.load_threshold
         self.layer_weights = dict(layer_weights)
         self.memory_overload_filter = memory_overload_filter
         self.do_shortcut = do_shortcut
@@ -125,8 +132,9 @@ class KVCacheAwareStrategy:
         self._max_num_batched_tokens: int | None = None
         logger.info(
             f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, "
-            f"load_threshold={self.load_threshold:.2f}, load_weights={self.load_weights}, "
-            f"memory_overload_filter={self.memory_overload_filter}, do_shortcut={self.do_shortcut}, "
+            f"load_threshold={self.load_threshold:.2f}, capacity_threshold={self.capacity_threshold:.2f}, "
+            f"load_weights={self.load_weights}, "
+            f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
             f"tie_tolerance={self.tie_tolerance:.3f}"
         )
@@ -134,7 +142,8 @@ class KVCacheAwareStrategy:
     def __repr__(self) -> str:
         return (
             f"KVCacheAwareStrategy(alpha={self.alpha}, load_threshold={self.load_threshold}, "
-            f"memory_overload_filter={self.memory_overload_filter}, do_shortcut={self.do_shortcut}, "
+            f"capacity_threshold={self.capacity_threshold}, "
+            f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
             f"tie_tolerance={self.tie_tolerance})"
         )
@@ -172,6 +181,7 @@ class KVCacheAwareStrategy:
         return cls(
             alpha=kwargs["alpha"],
             load_threshold=cfg.load_threshold,
+            capacity_threshold=kwargs["capacity_threshold"],
             layer_weights=kwargs["layer_weights"],
             memory_overload_filter=kwargs["memory_overload_filter"],
             do_shortcut=kwargs["do_shortcut"],
@@ -431,8 +441,8 @@ class KVCacheAwareStrategy:
 
             avail[i]     = cap - inflight_blocks[i] × block_size   # free capacity (tokens)
             need[i]      = len(prompt_ids) × (1 - gpu_hit[i])      # prefill this req adds
-            remaining[i] = avail[i] - need[i]                      # free capacity after assign
-            eligible[i]  = avail[i] >= cap × (1 - load_threshold)  # pure capacity gate
+            remaining[i] = avail[i] - need[i]                      # free capacity after assignxw
+            eligible[i]  = avail[i] >= cap × (1 - capacity_threshold)   # pure capacity gate
 
         ``need`` stays the token estimate ``len(prompt_ids) × (1 - gpu_hit)`` — how
         many prompt tokens this request has to recompute on that replica, i.e. the
@@ -516,7 +526,7 @@ class KVCacheAwareStrategy:
             top = self._soft_pick([rows[i]["inflight"] for i in range(n)], maximize=False)
             logger.info("score(): CAPACITY_TOKEN_AWARE cap unknown → soft-pick min inflight")
         else:
-            thresh = cap * (1.0 - self.load_threshold)
+            thresh = cap * (1.0 - self.capacity_threshold)
             eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
             pool = eligible or list(range(n))
             top = pool[self._soft_pick([rows[i]["remaining"] for i in pool], maximize=True)]
