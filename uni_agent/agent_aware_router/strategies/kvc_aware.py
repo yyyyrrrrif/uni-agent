@@ -247,6 +247,13 @@ class KVCacheAwareStrategy:
             # Emit the load the sticky check used (the bound replica).
             logger.info(f"is-overload replica={replica.replica_id} kv_load={load:.4f}")
             return load > self.load_threshold
+        if self.overload_mode == OverloadMode.REMAINING_CAP:
+            cap = self._total_token_capacity(store)
+            thresh = cap * (1.0 - self.capacity_threshold)
+            block_size = store.get_block_size() or 16
+            inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0
+            avail = cap - inflight_blocks * block_size
+            return avail < thresh
         raise ValueError(
             f"There is no {self.overload_mode}, please set overload_mode in ['None', 'kv_cache_usage_perc', 'kv_load']"
         )
