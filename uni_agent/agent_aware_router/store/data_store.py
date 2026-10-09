@@ -206,12 +206,12 @@ class DataStore:
 
     # ── In-flight block pinning ─────────────────────────────────────────
 
-    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> int:
-        """Pin a dispatch's prefix blocks on a replica; return the newly allocated count.
+    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Pin a dispatch's prefix blocks on a replica (ref-counted by block hash).
 
         Thin pass-through to ``KVCacheStore`` (see :meth:`KVCacheStore.pin_inflight_blocks`).
         """
-        return self._kv.pin_inflight_blocks(replica_id, hash_strs)
+        self._kv.pin_inflight_blocks(replica_id, hash_strs)
 
     def unpin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
         """Release one reference to each block a finishing request held (block-level ref count)."""

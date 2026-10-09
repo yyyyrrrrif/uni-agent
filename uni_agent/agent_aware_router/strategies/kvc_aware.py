@@ -429,8 +429,8 @@ class KVCacheAwareStrategy:
 
         ``need`` stays the token estimate ``len(prompt_ids) × (1 - gpu_hit)`` — how
         many prompt tokens this request has to recompute on that replica, i.e. the
-        prefill work assigning it there adds. It is deliberately *not* the block
-        count acquire books: that count would make ``remaining`` equal
+        prefill work assigning it there adds. It is deliberately *not* the held
+        blocks acquire pins: that would make ``remaining`` equal
         ``cap - blocks in use after this lands``, which cancels out the prefill
         term entirely (a shared prefix costs nothing in blocks wherever it is
         shared) and leaves the ranking blind to how much work each candidate would
@@ -438,16 +438,15 @@ class KVCacheAwareStrategy:
         hit-rate term of the ranking, while ``avail`` is the capacity term.
 
         Why the held-block gauge over both ``cap × (1 - kv_cache_usage_perc)`` and
-        the earlier ``INFLIGHT_TOKENS`` sum: ``kv_perc`` is polled (5 s stale, so a
+        the raw ``INFLIGHT_TOKENS`` sum: ``kv_perc`` is polled (5 s stale, so a
         whole fan-out burst reads the same pre-burst value) and running-only (an
         idle replica holding a full but evictable cache reports 0.000).
-        ``INFLIGHT_TOKENS`` moves at dispatch time but books what each request
-        *newly allocates*, which double-counts a shared prefix dispatched
-        concurrently and books nothing for a request whose prompt is fully
-        cached — yet that request still pins every one of those blocks. The pin
-        table de-duplicates by block hash and counts held blocks regardless of
-        whether they were a hit, so ``avail`` is occupancy rather than a sum of
-        past allocations. ``INFLIGHT_TOKENS`` stays in the logs below as the
+        ``INFLIGHT_TOKENS`` counts raw prompt tokens per in-flight request, so it
+        double-counts a shared prefix dispatched concurrently and stays booked for
+        a prompt whose blocks the engine has already evicted — a Σ of per-request
+        sizes, not occupancy. The pin table de-duplicates by block hash and
+        tracks the held set, so ``avail`` is occupancy.
+        ``INFLIGHT_TOKENS`` stays in the rows below as the observation-only
         cross-check. Blind spot: prompt blocks only — a replica whose in-flight
         requests generate long outputs (decode growth) still looks emptier than
         it is, which is what ``kv_perc`` covers in the logs.
@@ -506,7 +505,7 @@ class KVCacheAwareStrategy:
         if cap <= 0:
             # No token yardstick yet (first KV event not in): the token account has
             # no neutral baseline, so rank by in-flight request count instead.
-            top = self._soft_pick([rows[i]["inflight"] for i in range(n)], maximize=False)
+            top = self._soft_pick([rows[i]["inflight"] for i in range(n)], maximize=False, tolerance=0)
             logger.info("score(): CAPACITY_TOKEN_AWARE cap unknown → soft-pick min inflight")
         else:
             thresh = cap * (1.0 - self.load_threshold)

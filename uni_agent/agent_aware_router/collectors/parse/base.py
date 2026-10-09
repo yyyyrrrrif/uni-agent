@@ -86,9 +86,9 @@ class MetricsUpdate:
         prompt_ids: Input token ids of the acquiring request (empty when the
             source forwarded none). Carried for the same reason as
             ``request_id``: the collector — which owns the KV store — needs the
-            prompt to tell how much of it the target replica already caches, so
-            only the uncached remainder is booked as in-flight tokens. Ignored
-            by non-acquire updates.
+            prompt to resolve the request's block-hash chain and pin it on the
+            chosen replica (the held-block account behind ``INFLIGHT_BLOCKS``).
+            Ignored by non-acquire updates.
     """
 
     node_id: str

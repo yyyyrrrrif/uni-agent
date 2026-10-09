@@ -92,7 +92,7 @@ class FakeRouteDataProvider:
       num_requests_running – requests in flight (default 0)
       num_requests_waiting – requests in the queue (default 0)
       inflight_count       – in-flight acquire/release counter (default 0)
-      inflight_tokens      – booked (newly allocated) in-flight prompt tokens (default 0)
+      inflight_tokens      – raw in-flight prompt tokens, observation-only (default 0)
       inflight_blocks      – held in-flight KV blocks, dedup + ref counted (default 0)
       gpu_hit_pct          – GPU prefix cache hit percent 0-100 (default 0)
       tiers                – dict mapping tier name to hit rate (default {})
@@ -823,7 +823,7 @@ class TestFallbackModes:
         is the steady-state shape: kv blocks are occupied by the requests the
         router dispatched, and it still books them until release.
         """
-        strat = _strat(load_threshold=0.9, memory_overload_filter=False)
+        strat = _strat(load_threshold=0.9)
         provider = FakeRouteDataProvider(
             {
                 # cap must be > 0 (num_gpu_blocks) so the post-fallback ranking has a
@@ -1099,9 +1099,11 @@ class TestCapacityTokenAware:
         Expectation: tol=0.5 spreads; tol=0.05 pins index 0
         """
         loose = self._cap_strat(tie_tolerance=0.5)
-        assert {loose._soft_pick([-16.0, -24.0], maximize=True) for _ in range(200)} == {0, 1}
+        picked = {loose._soft_pick([-16.0, -24.0], maximize=True, tolerance=loose.tie_tolerance) for _ in range(200)}
+        assert picked == {0, 1}
         strict = self._cap_strat(tie_tolerance=0.05)
-        assert {strict._soft_pick([-16.0, -24.0], maximize=True) for _ in range(50)} == {0}
+        picked = {strict._soft_pick([-16.0, -24.0], maximize=True, tolerance=strict.tie_tolerance) for _ in range(50)}
+        assert picked == {0}
 
     def test_soft_pick_zero_best_only_exact_ties(self):
         """
@@ -1110,7 +1112,8 @@ class TestCapacityTokenAware:
         Expectation: candidates are the two zeros; -5 never wins
         """
         strat = self._cap_strat()
-        assert {strat._soft_pick([0.0, 0.0, -5.0], maximize=True) for _ in range(200)} == {0, 1}
+        picked = {strat._soft_pick([0.0, 0.0, -5.0], maximize=True, tolerance=strat.tie_tolerance) for _ in range(200)}
+        assert picked == {0, 1}
 
     def test_tie_tolerance_validation_default_and_repr(self):
         """

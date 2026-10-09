@@ -58,10 +58,10 @@ class StatisticEvent:
             not from this event.
         prompt_ids: The acquiring request's input token ids (empty when the
             caller forwarded none). Kept alongside ``prompt_len`` because the
-            in-flight token gauge books only the *uncached* part of the prompt,
-            and only the collector — which owns the KV store — can tell how much
-            of this prompt the chosen replica already caches. Set on
-            ``on_acquire`` only, same as ``prompt_len``.
+            collector pins the request's prefix blocks on the chosen replica
+            (the held-block account behind ``INFLIGHT_BLOCKS``), and only the
+            collector — which owns the KV store — can resolve that block-hash
+            chain. Set on ``on_acquire`` only, same as ``prompt_len``.
     """
 
     event: str

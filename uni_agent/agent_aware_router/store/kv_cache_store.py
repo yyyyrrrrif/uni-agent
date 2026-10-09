@@ -117,30 +117,23 @@ class KVCacheStore:
 
     # ── In-flight block holding (pin / unpin) ───────────────────────────
 
-    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> int:
+    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
         """Bump the ref count of every block an in-flight request holds.
 
-        Counts *before* incrementing: the return value is the number of blocks
-        that are neither already resident in this replica's prefix cache
-        (``cached_on``) nor already held by another in-flight request (``held``)
-        — i.e. exactly the blocks this dispatch has to allocate. Counting after
-        the increment would let the request's own pins hide its allocations.
+        Held blocks are deduplicated by hash and may already be resident in the
+        replica's prefix cache (a cache hit pins its blocks too) — the held
+        gauge is occupancy, not a sum of allocations.
 
         Args:
             replica_id: The replica the request was dispatched to.
             hash_strs: The request's full-block chained prefix hashes (may be
                 empty when the block size is not yet learned or no prompt was
                 forwarded — then nothing is pinned).
-
-        Returns:
-            Number of newly allocated blocks (0 for an empty/full-hit prefix).
         """
         with self._lock:
             held = self._inflight_blocks.setdefault(replica_id, {})
-            new_blocks = sum(1 for h in hash_strs if h not in held and not self._is_cached_locked(replica_id, h))
             for h in hash_strs:
                 held[h] = held.get(h, 0) + 1
-            return new_blocks
 
     def unpin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
         """Drop one reference to every block a finishing request held.

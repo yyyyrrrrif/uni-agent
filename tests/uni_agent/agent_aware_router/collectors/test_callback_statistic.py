@@ -105,7 +105,7 @@ class TestInflightParser:
         )
         assert isinstance(upd, MetricsUpdate)
         assert upd.prompt_ids == (1, 2, 3)
-        assert upd.metrics[MetricKey.INFLIGHT_TOKENS] == 3  # raw until the collector rewrites it
+        assert upd.metrics[MetricKey.INFLIGHT_TOKENS] == 3  # raw — the collector keeps it raw
 
     def test_on_release_emits_inflight_minus_completed_delta(self):
         upd = InflightParser().parse(StatisticEvent("on_release", replica_id="s0", request_id="r1"), "")
@@ -277,14 +277,15 @@ class TestCollectorCallbackIntegration:
         finally:
             collector.stop()
 
-    def test_acquire_books_uncached_tokens_and_release_subtracts_the_same(self):
-        """Feature: INFLIGHT_TOKENS nets out the chosen replica's prefix-cache hit.
+    def test_acquire_books_raw_tokens_and_pins_cached_blocks(self):
+        """Feature: INFLIGHT_TOKENS stays raw; the held-block account is where the
+          cache is respected.
         Description: a 64-token prompt (4 blocks of 16) whose first two blocks
-          the replica already caches → gpu_hit 0.5. Acquire must book 32 tokens
-          (the uncached half), not 64; the release must subtract exactly that 32.
+          the replica already caches → gpu_hit 0.5.
         Expectation:
-          after acquire: INFLIGHT_TOKENS=32, PROMPT_LEN_SUM=64 (raw request size)
-          after release: INFLIGHT_TOKENS=0, COMPLETED_COUNT=1
+          after acquire: INFLIGHT_TOKENS=64 (raw, not netted), PROMPT_LEN_SUM=64,
+            INFLIGHT_BLOCKS=4 (cached blocks are held like misses)
+          after release: INFLIGHT_TOKENS=0, COMPLETED_COUNT=1, INFLIGHT_BLOCKS=0
         """
         from uni_agent.agent_aware_router.collectors.collector import Collector
         from uni_agent.agent_aware_router.store.data_store import DataStore
@@ -304,41 +305,19 @@ class TestCollectorCallbackIntegration:
         collector.start()
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 32  # 64 × (1 − 0.5)
-            assert ds.get_metric("s0", MetricKey.PROMPT_LEN_SUM) == 64  # evidence stays raw
-            assert ds.get_per_request("r1", "inflight_tokens", None) == 32
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 64  # raw, observation-only
+            assert ds.get_metric("s0", MetricKey.PROMPT_LEN_SUM) == 64
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4  # hits held too
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
             assert ds.get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
         finally:
             collector.stop()
 
-    def test_fully_cached_prompt_books_zero_inflight_tokens(self):
-        """A 100%-cached prompt adds no KV footprint → books 0 (release stays 0)."""
-        from uni_agent.agent_aware_router.collectors.collector import Collector
-        from uni_agent.agent_aware_router.store.data_store import DataStore
-        from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
-
-        prompt = list(range(2 * BLOCK_SIZE))
-        ds = DataStore()
-        ds.set_block_size(BLOCK_SIZE)
-        chain = resolve_prefix_hashes(prompt, "r1", ds)
-        ds.add_kv_blocks("s0", chain)
-
-        balancer = _FakeBalancer()
-        collector = Collector(CallbackTransport(balancer), InflightParser())
-        collector.start()
-        try:
-            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
-            balancer.callbacks["on_release"][0]("s0", "r1")
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0  # symmetric, not negative
-        finally:
-            collector.stop()
-
-    def test_missing_prompt_ids_or_block_size_falls_back_to_raw_len(self):
-        """No token list / no learned block size → no hit evidence → book raw plen."""
+    def test_missing_prompt_ids_or_block_size_still_books_raw_len(self):
+        """No token list / no learned block size → nothing pinned, raw plen booked."""
         from uni_agent.agent_aware_router.collectors.collector import Collector
         from uni_agent.agent_aware_router.store.data_store import DataStore
 
@@ -349,7 +328,11 @@ class TestCollectorCallbackIntegration:
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", list(range(64)))  # no block size
             balancer.callbacks["on_acquire"][0]("r2", "s0", None)  # no prompt at all
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 64  # raw, not 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 64  # raw
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0  # nothing pinned
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0  # balanced
         finally:
             collector.stop()
 
@@ -414,7 +397,7 @@ class TestInflightBlockPin:
 
     ``INFLIGHT_BLOCKS`` is what the capacity strategy turns into free capacity
     (``avail = cap − blocks × block_size``). It follows the *held* block set, not
-    the booked-token sum: shared prefixes count once, and a release that frees
+    a raw token sum: shared prefixes count once, and a release that frees
     nothing (another request still holds those blocks) must leave the gauge
     where it was.
     """
@@ -451,10 +434,9 @@ class TestInflightBlockPin:
         Feature: the held gauge de-duplicates by block hash and a release only
           drops what the releasing request uniquely held.
         Description: r1 and r2 dispatch the identical 4-block prompt to s0 (no
-          BlockStored yet, so neither is a cache hit — the case where the v1
-          token sum booked both prompts twice over).
+          BlockStored yet, so neither is a cache hit).
         Expectation: ``INFLIGHT_BLOCKS`` = 4 after both acquires (not 8);
-          ``INFLIGHT_TOKENS`` books 64 then 0 (r2 allocates nothing);
+          ``INFLIGHT_TOKENS`` stays raw (64 → 128 → 64 → 0, observation-only);
           releasing r1 leaves 4 (r2 still holds all of them); releasing r2 → 0.
         """
         prompt = list(range(4 * BLOCK_SIZE))
@@ -462,15 +444,15 @@ class TestInflightBlockPin:
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE  # raw
 
             balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4  # dedup
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE  # +0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 8 * BLOCK_SIZE  # raw again
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4  # r2 still holds all
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0  # r1's booking only
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE  # r1's row only
 
             balancer.callbacks["on_release"][0]("s0", "r2")
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
@@ -500,13 +482,13 @@ class TestInflightBlockPin:
         finally:
             collector.stop()
 
-    def test_cache_hit_blocks_are_held_even_though_they_book_no_tokens(self):
-        """The v1 blind spot: a fully-cached prompt books 0 tokens but pins its blocks.
+    def test_cache_hit_blocks_are_held_while_tokens_stay_raw(self):
+        """A fully-cached prompt pins its blocks while the token gauge books raw.
 
         Feature: ``INFLIGHT_BLOCKS`` counts held blocks regardless of hit/miss.
         Description: s0 already caches the whole 2-block prompt; the dispatch
-          allocates nothing (``INFLIGHT_TOKENS`` += 0) but does pin 2 blocks.
-        Expectation: blocks = 2, tokens = 0; release returns both to 0.
+          books the raw prompt length (observation-only) but pins 2 blocks.
+        Expectation: blocks = 2; release returns both to 0.
         """
         from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
 
@@ -516,24 +498,24 @@ class TestInflightBlockPin:
             ds.add_kv_blocks("s0", resolve_prefix_hashes(prompt, None, ds))
 
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 2 * BLOCK_SIZE  # raw
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 2
 
             balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
         finally:
             collector.stop()
 
-    def test_no_prompt_ids_pins_nothing_and_is_tallied(self):
-        """No prompt / unknown block size → nothing pinned, and the blind spot is counted.
+    def test_no_prompt_ids_pins_nothing(self):
+        """No prompt / unknown block size → nothing pinned, raw plen booked.
 
         Feature: an unaccountable dispatch must not silently vanish from the
           held-block account.
         Description: r1 dispatches with ``prompt_ids=None`` on a replica whose
           block size is unknown (no KV event yet).
-        Expectation: ``INFLIGHT_BLOCKS`` = 0, ``INFLIGHT_TOKENS`` falls back to the
-          raw prompt length (conservative), ``_unaccounted_dispatches`` = 1; the
-          release is a clean no-op.
+        Expectation: ``INFLIGHT_BLOCKS`` = 0, ``INFLIGHT_TOKENS`` = the raw
+          prompt length; the release is a clean no-op.
         """
         prompt = list(range(4 * BLOCK_SIZE))
         collector, balancer, ds = self._start(block_size=BLOCK_SIZE)
@@ -543,7 +525,6 @@ class TestInflightBlockPin:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
             assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE
-            assert collector._unaccounted_dispatches == 1
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
@@ -586,7 +567,7 @@ class TestInflightBlockPin:
         """A dropped release must not double the held set for the next turn.
 
         Feature: re-acquire detects the stale pin marker, unpins first, and nets
-          out the still-booked tokens.
+          the still-booked raw tokens out of the new acquire.
         Description: r1 acquires the same prompt twice, with no release between
           (a lost COMPLETED_COUNT), then releases once.
         Expectation: a WARNING is logged; ``INFLIGHT_BLOCKS`` = 4 (not 8) and

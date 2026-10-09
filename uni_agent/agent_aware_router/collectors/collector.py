@@ -68,12 +68,11 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
     MetricKey.ESTIMATED_FLOPS_PER_GPU,
 )
 
-# Per-request bookkeeping key: in-flight tokens recorded at dispatch (the blocks
-# this dispatch had to allocate, see ``_book_dispatch_blocks``). verl #7115
+# Per-request bookkeeping key: prompt length recorded at dispatch. verl #7115
 # releases carry no token list, so the release-side ``INFLIGHT_TOKENS`` delta
 # is folded from this row — same acquire-record / release-consume shape as the
 # per-request "turn" counter below.
-_INFLIGHT_TOKENS_KEY = "inflight_tokens"
+_PROMPT_LEN_KEY = "prompt_len"
 
 # Per-request bookkeeping key: the replica this request's prefix blocks are
 # pinned on (``KVCacheStore.pin_inflight_blocks``). Release unpins through it and
@@ -119,14 +118,6 @@ class Collector:
         self._kv_last_logged_total = 0
         # Last-emit time for the dispatched/completed/inflight_turn_sum snapshot (throttled).
         self._dispatch_last_log: float = 0.0
-        # Cumulative dispatch-time prompt tokens vs the booked part of them —
-        # the realized allocation saving the in-flight token gauge nets out.
-        # Logged with the dispatch snapshot (``router-inflight-tokens``).
-        self._inflight_token_sums: dict[str, int] = {"dispatched": 0, "uncached": 0}
-        # Dispatches whose block list was unresolvable (no prompt_ids / block size
-        # unknown): nothing was pinned, so their capacity is invisible in the
-        # held-block account. Counted rather than silently dropped.
-        self._unaccounted_dispatches: int = 0
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -222,17 +213,17 @@ class Collector:
         turn sum (``INFLIGHT_TURN_SUM``) and the release-side token delta
         (``INFLIGHT_TOKENS``) are folded into the same locked write from
         per-request rows recorded at dispatch — acquire records the request's
-        current turn and its booked token count, release subtracts both
-        (release changes neither, so it subtracts what acquire recorded).
-        verl #7115 releases carry no token list, which is why the count lives in
-        a per-request row rather than the release event.
-        On acquire the parser's raw ``prompt_len`` token delta is rewritten to
-        the blocks this dispatch actually has to allocate (see
-        :meth:`_book_dispatch_blocks`) and the request's prefix blocks are pinned
-        on the chosen replica, which refreshes the absolute ``INFLIGHT_BLOCKS``
-        gauge — the *held* occupancy the capacity strategy turns into free
-        capacity. Release unpins the same blocks through the acquire-time memo
-        (:meth:`_release_inflight_blocks`).
+        current turn and prompt length, release subtracts both (release changes
+        neither, so it subtracts what acquire recorded). verl #7115 releases
+        carry no token list, which is why the length lives in a per-request row
+        rather than the release event.
+        On acquire the request's prefix blocks are pinned on the chosen replica
+        (:meth:`_pin_dispatch_blocks`), which refreshes the absolute
+        ``INFLIGHT_BLOCKS`` gauge — the *held* occupancy the capacity strategy
+        turns into free capacity. Release unpins the same blocks through the
+        acquire-time memo (:meth:`_release_inflight_blocks`). ``INFLIGHT_TOKENS``
+        itself keeps the raw prompt_len bookkeeping above — observation-only;
+        the free-capacity account is the held-block gauge.
         Both acquire and release refresh the throttled ``router-dispatch``
         snapshot. Absolute (non-delta) updates are polled gauges, handled
         below. When rl-insight emit is on, each write also builds a
@@ -251,16 +242,16 @@ class Collector:
                 if update.request_id is None:
                     logger.debug(
                         "dispatch (DISPATCHED_COUNT) update missing request_id — "
-                        "skipping turn, block pinning and token rewrite (raw prompt_len booked)"
+                        "skipping turn and block pinning (raw prompt_len booked)"
                     )
                 else:
                     deltas[MetricKey.INFLIGHT_TURN_SUM] = self._data_store.incr_per_request(update.request_id, "turn")
                     raw_tokens = deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
                     # A pin marker still on the request means its previous dispatch
-                    # never released (a dropped COMPLETED_COUNT): unpin that set and
-                    # net out its still-booked tokens, otherwise both leak forever.
+                    # never released (a dropped COMPLETED_COUNT): unpin that set first
+                    # and net its still-booked tokens out of this acquire's raw delta,
+                    # otherwise both the held set and the token gauge leak forever.
                     stale_replica = self._data_store.get_per_request(update.request_id, _INFLIGHT_BLOCK_PIN_KEY, None)
-                    stale_booked = 0
                     if stale_replica is not None:
                         logger.warning(
                             f"re-acquire without release request={update.request_id} on {stale_replica} "
@@ -269,20 +260,13 @@ class Collector:
                         self._data_store.unpin_inflight_blocks(
                             stale_replica, get_prefix_hashes(update.request_id, self._data_store) or []
                         )
-                        stale_booked = self._data_store.get_per_request(update.request_id, _INFLIGHT_TOKENS_KEY, 0)
-                    booked, hash_strs = self._book_dispatch_blocks(
-                        update.node_id, update.request_id, update.prompt_ids, raw_tokens
-                    )
-                    booked_delta = booked - stale_booked
-                    deltas[MetricKey.INFLIGHT_TOKENS] = booked_delta
-                    self._inflight_token_sums["dispatched"] += raw_tokens
-                    self._inflight_token_sums["uncached"] += booked_delta
-                    if not hash_strs:
-                        self._unaccounted_dispatches += 1
-                    self._data_store.set_per_request(update.request_id, _INFLIGHT_TOKENS_KEY, booked)
-                    if hash_strs:
-                        self._data_store.set_per_request(update.request_id, _INFLIGHT_BLOCK_PIN_KEY, update.node_id)
-                    self._refresh_inflight_blocks(update.node_id)
+                        self._data_store.del_per_request(update.request_id, _INFLIGHT_BLOCK_PIN_KEY)
+                        self._refresh_inflight_blocks(stale_replica)
+                        deltas[MetricKey.INFLIGHT_TOKENS] = raw_tokens - self._data_store.get_per_request(
+                            update.request_id, _PROMPT_LEN_KEY, 0
+                        )
+                    self._data_store.set_per_request(update.request_id, _PROMPT_LEN_KEY, raw_tokens)
+                    self._pin_dispatch_blocks(update.node_id, update.request_id, update.prompt_ids)
             elif is_release:
                 if update.request_id is None:
                     logger.debug(
@@ -293,7 +277,7 @@ class Collector:
                         update.request_id, "turn", 0
                     )
                     deltas[MetricKey.INFLIGHT_TOKENS] = -self._data_store.get_per_request(
-                        update.request_id, _INFLIGHT_TOKENS_KEY, 0
+                        update.request_id, _PROMPT_LEN_KEY, 0
                     )
                     self._release_inflight_blocks(update.node_id, update.request_id)
             new_values = self._data_store.incr_metrics(update.node_id, deltas)
@@ -333,40 +317,28 @@ class Collector:
             for nid in self._data_store.get_metric_node_ids():
                 self._log_evidence_window(nid)
 
-    def _book_dispatch_blocks(
-        self,
-        node_id: str,
-        request_id: str,
-        prompt_ids: tuple[int, ...],
-        raw_tokens: int | float,
-    ) -> tuple[int, list[str]]:
-        """Pin this dispatch's prefix blocks; return ``(booked_tokens, hash_strs)``.
+    def _pin_dispatch_blocks(self, node_id: str, request_id: str, prompt_ids: tuple[int, ...]) -> None:
+        """Pin this dispatch's prefix blocks on the chosen replica (``INFLIGHT_BLOCKS``).
 
-        **Ledger 1** (``INFLIGHT_TOKENS``) books what this dispatch has to
-        *allocate*: the blocks that are neither resident in the chosen replica's
-        prefix cache nor already pinned by another in-flight request, times the
-        block size. That is the block-granular refinement of the earlier
-        ``prompt_len × (1 − gpu_hit)``, which double-counted a concurrently
-        dispatched shared prefix — "not in the cache yet" is not "free", so the
-        second rollout of the same prompt booked its whole prefill twice over.
-        **Ledger 2** (``INFLIGHT_BLOCKS``) is the absolute held set, pinned here
-        and re-read right after by :meth:`_refresh_inflight_blocks`.
-
-        Falls back to booking the raw ``prompt_len`` when there is nothing to
-        pin: no ``prompt_ids`` forwarded, a block size that is not learned yet
-        (the hash chain is unresolvable), or an empty chain. Erring on the raw
-        length keeps the gauge conservative (never books less than the true
-        footprint) and matches the pre-change behavior; those dispatches are
-        tallied in ``_unaccounted_dispatches`` so the blind spot is visible.
+        The held set is the router's own load account: the request's full-block
+        hash chain (memoized by :func:`resolve_prefix_hashes` at acquire) is
+        pinned ref-counted by block hash, and the absolute ``INFLIGHT_BLOCKS``
+        gauge is refreshed right after — that gauge, not the token ledger, is
+        what the capacity strategy turns into free capacity. Skipped when there
+        is nothing to pin: no ``prompt_ids`` forwarded, a block size that is not
+        learned yet (the chain is unresolvable), or an empty chain — the held
+        gauge then cannot see this dispatch (prompt blocks only, no decode
+        growth).
         """
         block_size = self._data_store.get_block_size()
         if not prompt_ids or not block_size:
-            return int(raw_tokens), []
+            return
         hash_strs = resolve_prefix_hashes(list(prompt_ids), request_id, self._data_store)
         if not hash_strs:
-            return int(raw_tokens), []
-        new_blocks = self._data_store.pin_inflight_blocks(node_id, hash_strs)
-        return new_blocks * int(block_size), hash_strs
+            return
+        self._data_store.pin_inflight_blocks(node_id, hash_strs)
+        self._data_store.set_per_request(request_id, _INFLIGHT_BLOCK_PIN_KEY, node_id)
+        self._refresh_inflight_blocks(node_id)
 
     def _release_inflight_blocks(self, node_id: str, request_id: str) -> None:
         """Unpin a finishing request's blocks and refresh its replica's held gauge.
@@ -447,20 +419,6 @@ class Collector:
             logger.info(
                 f"router-dispatch replica={rep} dispatched={dispatched} completed={completed} "
                 f"inflight_turn_sum={inflight_turn_sum} prompt_len_sum={prompt_len_sum}"
-            )
-        # What the INFLIGHT_TOKENS gauge books vs the raw dispatched prompt
-        # tokens: the gap is the prefix-cache hit the gauge nets out. Compare
-        # against vllm's own cached/prefill counters in the evidence log.
-        # ``unaccounted_dispatches`` counts dispatches with no resolvable block
-        # list (nothing pinned, so the held-block gauge cannot see them).
-        dispatched_tokens = self._inflight_token_sums["dispatched"]
-        if dispatched_tokens or self._unaccounted_dispatches:
-            uncached_tokens = self._inflight_token_sums["uncached"]
-            hit = f"{1.0 - uncached_tokens / dispatched_tokens:.3f}" if dispatched_tokens else "-"
-            logger.info(
-                f"router-inflight-tokens dispatched_prompt_tokens={dispatched_tokens} "
-                f"uncached_tokens={uncached_tokens} (dispatch-time gpu_hit={hit}) "
-                f"unaccounted_dispatches={self._unaccounted_dispatches}"
             )
 
     def _log_evidence_window(self, node_id: str) -> None:
