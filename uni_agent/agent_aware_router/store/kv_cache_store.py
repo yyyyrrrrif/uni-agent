@@ -188,6 +188,22 @@ class KVCacheStore:
         with self._lock:
             return len(self._inflight_blocks.get(replica_id, {}))
 
+    def predict_pin_delta(self, replica_id: str, hash_strs: list[str]) -> int:
+        """Count chain blocks not already held (pinned) by in-flight requests on ``replica_id``.
+
+        The admission gate's ledger-consistent increment: after dispatch the
+        collector pins the request's full chain (dedup by hash — occupancy
+        semantics, cached blocks included), so the true pin delta is the chain
+        minus the replica's current held set. Read-only; no side effects.
+        """
+        if not hash_strs:
+            return 0
+        with self._lock:
+            held = self._inflight_blocks.get(replica_id)
+            if not held:
+                return len(set(hash_strs))
+            return sum(1 for h in set(hash_strs) if h not in held)
+
     def _is_cached_locked(self, replica_id: str, hash_str: str) -> bool:
         """Whether ``replica_id`` already caches ``hash_str``. Caller holds ``_lock``."""
         cached = self.replicas_by_block.get(hash_str)

@@ -24,6 +24,7 @@ from hydra.errors import InstantiationException
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
+from .admission import AdmissionConfig
 from .base import (
     ConfigError,
     StrategyConfig,
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 _DEFAULT_COLLECTOR = CollectorConfig()
+_DEFAULT_ADMISSION = AdmissionConfig()
 
 
 @dataclass(repr=False)
@@ -53,10 +55,12 @@ class KVCAwareConfig:
     Attributes:
         strategy: Polymorphic strategy config (with ``_target_``).
         collector: Collector module connection-type tuning config.
+        admission: Turn-phase admission gate config (mode + ledger knobs).
     """
 
     strategy: StrategyConfig  # required, no default
     collector: CollectorConfig = field(default_factory=lambda: _DEFAULT_COLLECTOR)
+    admission: AdmissionConfig = field(default_factory=lambda: _DEFAULT_ADMISSION)
 
     @classmethod
     def from_config(cls, cfg: DictConfig | dict) -> KVCAwareConfig:
@@ -79,10 +83,11 @@ class KVCAwareConfig:
         # for structured-input compatibility.
         strategy_raw = _extract_strategy(cfg)
 
-        # ── Step 1: merge dataclass-typed fields (collector) ──
+        # ── Step 1: merge dataclass-typed fields (collector, admission) ──
         defaults = OmegaConf.create(
             {
                 "collector": OmegaConf.structured(CollectorConfig),
+                "admission": OmegaConf.structured(AdmissionConfig),
             }
         )
         kwargs_for_merge = OmegaConf.create(cfg)
@@ -93,13 +98,14 @@ class KVCAwareConfig:
                 kwargs_for_merge.pop(key, None)
                 OmegaConf.set_struct(kwargs_for_merge, True)
 
-        # Validate non-dict types for collector
-        if (
-            "collector" in kwargs_for_merge
-            and kwargs_for_merge.collector is not None
-            and not isinstance(kwargs_for_merge.collector, dict | DictConfig)
-        ):
-            raise ConfigError(f"collector must be a dict, got {type(kwargs_for_merge.collector).__name__}")
+        # Validate non-dict types for dataclass sections
+        for section_name in ("collector", "admission"):
+            if (
+                section_name in kwargs_for_merge
+                and kwargs_for_merge[section_name] is not None
+                and not isinstance(kwargs_for_merge[section_name], dict | DictConfig)
+            ):
+                raise ConfigError(f"{section_name} must be a dict, got {type(kwargs_for_merge[section_name]).__name__}")
 
         merged = OmegaConf.merge(defaults, kwargs_for_merge)
         config_obj = OmegaConf.to_object(merged)
@@ -107,8 +113,10 @@ class KVCAwareConfig:
         # Extract resolved dataclass fields
         if isinstance(config_obj, dict):
             collector_cfg = config_obj.get("collector") or CollectorConfig()
+            admission_cfg = config_obj.get("admission") or AdmissionConfig()
         else:
             collector_cfg = getattr(config_obj, "collector", None) or CollectorConfig()
+            admission_cfg = getattr(config_obj, "admission", None) or AdmissionConfig()
 
         # ── Step 2: parse strategy (polymorphic) ────────────────────
         if strategy_raw is None:
@@ -119,6 +127,7 @@ class KVCAwareConfig:
         result = cls(
             strategy=strategy,
             collector=collector_cfg,
+            admission=admission_cfg,
         )
         result.validate()
         return result
@@ -142,11 +151,15 @@ class KVCAwareConfig:
         if not override:
             return
         declared_fields: set[str] = set()
-        for section in (self.strategy, self.collector):
+        for section in (self.strategy, self.collector, self.admission):
             declared_fields.update(f.name for f in fields(section) if f.init)
         unknown = sorted(set(override) - declared_fields)
 
-        for section_name, section in (("strategy", self.strategy), ("collector", self.collector)):
+        for section_name, section in (
+            ("strategy", self.strategy),
+            ("collector", self.collector),
+            ("admission", self.admission),
+        ):
             declared = {f.name for f in fields(section) if f.init}
             matched = {k: v for k, v in override.items() if k in declared and v is not None}
             if not matched:

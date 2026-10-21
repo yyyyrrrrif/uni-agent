@@ -14,12 +14,14 @@
 
 """KVCAware config types."""
 
+from .admission import AdmissionConfig
 from .base import ConfigError, StrategyConfig
 from .collector import CollectorConfig
 from .router import KVCAwareConfig
 from .strategy import KVCAwareStrategyConfig
 
 __all__ = [
+    "AdmissionConfig",
     "CollectorConfig",
     "ConfigError",
     "KVCAwareConfig",

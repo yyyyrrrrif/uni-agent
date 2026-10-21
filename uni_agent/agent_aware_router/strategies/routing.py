@@ -88,7 +88,10 @@ def route(
     """
     n = len(replicas)
     if n == 0:
-        raise RuntimeError("no available replicas")
+        # Transient unavailability (empty pool) — message-aligned with verl's
+        # retry branch ("No available servers in load balancer") so the client
+        # retries in 1 s instead of the request dying (design doc §5.6.4).
+        raise RuntimeError("pool-empty | No available servers in load balancer")
 
     name = type(strategy).__name__
     try:

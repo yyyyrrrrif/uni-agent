@@ -33,6 +33,8 @@ KV-cache-aware knobs:
   --kv-events           vLLM kv-events zmq publisher; the kvcaware collector's load signal
                         (retained-cache occupancy).
   --load-threshold      strategy[0] overrides; each falls back to the packaged YAML value.
+  --admission-mode      turn-phase admission gate (design doc §5): shadow = P0 empty run
+                        (gate logic log-only, nothing intercepted); enforce = P1 hard gate.
   --max-num-seqs        engine max concurrent sequences.
 
 Debug mode — env overrides for the internalized strategy knobs (no CLI flags;
@@ -247,7 +249,9 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
         task_runner["runner_kwargs"] = {}
     # KV-cache-aware router knobs — the balancer overrides the packaged router
     # YAML with this node at construction (``custom.agent_framework.router``).
-    agent_framework_cfg["router"] = {"load_threshold": args.load_threshold}
+    # ``mode`` is the turn-phase admission gate (design doc §5); None keeps the
+    # packaged YAML value (off). apply_override skips None keys ("not set").
+    agent_framework_cfg["router"] = {"load_threshold": args.load_threshold, "mode": args.admission_mode}
     agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
@@ -548,6 +552,15 @@ def main() -> None:
         default=0.9,
         help="KVCAware load_threshold (overload when load > threshold, (0,1)); "
         "read by the balancer from rollout.custom.agent_framework.router at construction.",
+    )
+    parser.add_argument(
+        "--admission-mode",
+        choices=["off", "shadow", "enforce"],
+        default=None,
+        help="Turn-phase admission gate mode (design doc §5); None keeps the packaged "
+        "YAML value (off). shadow (P0): full gate logic, log-only — watch admission: / "
+        "ledger-check: / predict-check: lines, nothing is intercepted. enforce (P1): "
+        "infeasible requests park in the balancer defer queue (CapacityDeferred).",
     )
 
     args = parser.parse_args()

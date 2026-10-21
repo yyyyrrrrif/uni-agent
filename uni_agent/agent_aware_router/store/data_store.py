@@ -237,6 +237,15 @@ class DataStore:
         """Number of distinct blocks currently pinned by in-flight requests on ``replica_id``."""
         return self._kv.inflight_block_count(replica_id)
 
+    def predict_pin_delta(self, replica_id: str, hash_strs: list[str]) -> int:
+        """Count chain blocks not already pinned by in-flight requests on ``replica_id``.
+
+        Thin pass-through to ``KVCacheStore`` (see
+        :meth:`KVCacheStore.predict_pin_delta`) — the admission gate's
+        ledger-consistent increment query.
+        """
+        return self._kv.predict_pin_delta(replica_id, hash_strs)
+
     # ── PerReplicaStore incremental write ──────────────────────────────────
 
     def incr_metric(self, node_id: str, key: str, delta: int | float = 1) -> int | float:
