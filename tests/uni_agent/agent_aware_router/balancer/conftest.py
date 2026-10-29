@@ -24,9 +24,10 @@ def _reset_store_singletons():
     from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
     from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
     from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
+    from uni_agent.agent_aware_router.store.session_phase_ledger import SessionPhaseLedger
 
-    for cls in (PerReplicaStore, KVCacheStore, PerRequestStore):
+    for cls in (PerReplicaStore, KVCacheStore, PerRequestStore, SessionPhaseLedger):
         cls._instance = None
     yield
-    for cls in (PerReplicaStore, KVCacheStore, PerRequestStore):
+    for cls in (PerReplicaStore, KVCacheStore, PerRequestStore, SessionPhaseLedger):
         cls._instance = None

@@ -56,6 +56,12 @@ DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
     "tie_tolerance": 0.05,
     "seed": None,
     "capacity_threshold": 0.5,
+    # Acting-hold soft commitment (tool-call phase cache claims, design §5.3/Q9):
+    # subtract Σ ctx×2^(−gap/τ) of released sessions from each replica's avail.
+    # Debug-env knobs (UNI_AGENT_ROUTER_ENABLE_ACTING_HOLD / _ACTING_HOLD_HALF_LIFE,
+    # gated by UNI_AGENT_ROUTER_DEBUG) — not persisted in the strategy config.
+    "enable_acting_hold": True,
+    "acting_hold_half_life": 120.0,
 }
 
 
@@ -82,6 +88,8 @@ class KVCacheAwareStrategy:
         overload_mode: OverloadMode | str = OverloadMode.KV_CACHE_USAGE_PERC,
         tie_tolerance: float = 0.05,
         seed: int | None = None,
+        enable_acting_hold: bool = True,
+        acting_hold_half_life: float = 120.0,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
@@ -118,6 +126,14 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"tie_tolerance must be in [0, 1], got {tie_tolerance}")
         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
             raise StrategyError(f"seed must be an int or None, got {seed!r}")
+        if not isinstance(enable_acting_hold, bool):
+            raise StrategyError(f"enable_acting_hold must be a bool, got {enable_acting_hold!r}")
+        if (
+            isinstance(acting_hold_half_life, bool)
+            or not isinstance(acting_hold_half_life, int | float)
+            or acting_hold_half_life <= 0
+        ):
+            raise StrategyError(f"acting_hold_half_life must be a number > 0, got {acting_hold_half_life!r}")
 
         self.alpha = float(alpha)
         self.load_threshold = float(load_threshold)
@@ -128,6 +144,8 @@ class KVCacheAwareStrategy:
         self.load_weights = tuple(load_weights)
         self.overload_mode = overload_mode
         self.tie_tolerance = float(tie_tolerance)
+        self.enable_acting_hold = enable_acting_hold
+        self.acting_hold_half_life = float(acting_hold_half_life)
         self._seed = int(seed) if seed is not None else random.SystemRandom().randrange(SEED_RANGE)
         self._rng = random.Random(self._seed)
         self._max_num_seqs: int | None = None
@@ -138,7 +156,8 @@ class KVCacheAwareStrategy:
             f"load_weights={self.load_weights}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
-            f"tie_tolerance={self.tie_tolerance:.3f}, seed={self._seed}"
+            f"tie_tolerance={self.tie_tolerance:.3f}, seed={self._seed}, "
+            f"enable_acting_hold={self.enable_acting_hold}, acting_hold_half_life={self.acting_hold_half_life:.1f}s"
         )
 
     def __repr__(self) -> str:
@@ -147,7 +166,8 @@ class KVCacheAwareStrategy:
             f"capacity_threshold={self.capacity_threshold}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
-            f"tie_tolerance={self.tie_tolerance}, seed={self._seed})"
+            f"tie_tolerance={self.tie_tolerance}, seed={self._seed}, "
+            f"enable_acting_hold={self.enable_acting_hold}, acting_hold_half_life={self.acting_hold_half_life})"
         )
 
     def set_capacity(self, max_num_seqs: int, max_num_batched_tokens: int) -> None:
@@ -192,6 +212,8 @@ class KVCacheAwareStrategy:
             overload_mode=kwargs["overload_mode"],
             tie_tolerance=kwargs["tie_tolerance"],
             seed=kwargs["seed"],
+            enable_acting_hold=kwargs["enable_acting_hold"],
+            acting_hold_half_life=kwargs["acting_hold_half_life"],
         )
 
     def _compute_load(
@@ -455,11 +477,15 @@ class KVCacheAwareStrategy:
         occupancy, unlike the polled ``kv_perc`` or the raw ``INFLIGHT_TOKENS``
         sum (both logged as cross-checks only)::
 
-            avail[i]     = cap - inflight_blocks[i] × block_size   # free capacity (tokens)
+            avail[i]     = cap - inflight_blocks[i] × block_size - acting_hold[i]
             need[i]      = len(prompt_ids) × (1 - gpu_hit[i])      # prefill this req adds
             remaining[i] = avail[i] - need[i]                      # free capacity after assign
             eligible[i]  = avail[i] >= cap × (1 - capacity_threshold)   # pure capacity gate
 
+        ``acting_hold[i]`` is the soft commitment of sessions released on i
+        (tool-call phase): ``Σ ctx × 2^(−gap/τ)`` from the session-phase
+        ledger — released ≠ free, their caches still claim space on i until
+        evicted or the session returns. Disable via ``enable_acting_hold=False``.
         ``need`` keeps the prefill-work estimate (not the held blocks) so the
         ranking still sees how much work each candidate adds. ``cap == 0``
         (first KV event not in) falls back to min in-flight count; a no-eligible
@@ -472,6 +498,7 @@ class KVCacheAwareStrategy:
         # before the first KV event teaches the real block size.
         block_size = store.get_block_size() or 16
         plen = len(prompt_ids) if prompt_ids else 0
+        hold_by_replica = store.acting_hold_by_replica(self.acting_hold_half_life) if self.enable_acting_hold else {}
         rows: list[dict] = []
         for replica in replicas:
             kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
@@ -479,7 +506,8 @@ class KVCacheAwareStrategy:
             inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
             inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0
             s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
-            avail = cap - inflight_blocks * block_size
+            hold = hold_by_replica.get(replica.replica_id, 0.0)
+            avail = cap - inflight_blocks * block_size - hold
             need = plen * (1.0 - gpu_hit)
             remaining = avail - need
             # Emit as fractions of capacity (default-bucket friendly); skip when cap unknown.
@@ -499,6 +527,7 @@ class KVCacheAwareStrategy:
                     "inflight": inflight,
                     "inflight_tokens": inflight_tokens,
                     "inflight_blocks": inflight_blocks,
+                    "hold": hold,
                     "gpu_hit": gpu_hit,
                     "s_cache": s_cache,
                     "avail": avail,
@@ -528,7 +557,7 @@ class KVCacheAwareStrategy:
             logger.debug(
                 f"score(): replica={row['replica'].replica_id} kv_perc={row['kv_perc']:.3f} "
                 f"gpu_hit={row['gpu_hit']:.3f} inflight={row['inflight']} "
-                f"avail={row['avail']:.0f} need={row['need']:.0f} "
+                f"avail={row['avail']:.0f} (hold={row['hold']:.0f}) need={row['need']:.0f} "
                 f"max_num_batched_tokens={self._max_num_batched_tokens} inflight_tokens={row['inflight_tokens']:} "
                 f"inflight_blocks={row['inflight_blocks']} "
                 f"remaining={row['remaining']:.0f}{tag}"
@@ -536,7 +565,7 @@ class KVCacheAwareStrategy:
         winner = rows[top]["replica"].replica_id
         logger.info(
             f"score(): CAPACITY_TOKEN_AWARE winner={winner} "
-            f"(avail={rows[top]['avail']:.0f}, need={rows[top]['need']:.0f}, "
+            f"(avail={rows[top]['avail']:.0f}, hold={rows[top]['hold']:.0f}, need={rows[top]['need']:.0f}, "
             f"remaining={rows[top]['remaining']:.0f}, inflight_blocks={rows[top]['inflight_blocks']}, "
             f"inflight_tokens={rows[top]['inflight_tokens']}, kv_perc={rows[top]['kv_perc']:.3f})"
         )

@@ -49,6 +49,7 @@ DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
 _METRICS_LOG_INTERVAL_S = 30
 _DISPATCH_LOG_INTERVAL_S = 5.0
 _KV_EVENT_LOG_INTERVAL_S = 500
+_PHASE_LOG_INTERVAL_S = 60.0
 
 
 # Cumulative metrics tracked for windowed deltas in the evidence log. Single
@@ -115,6 +116,8 @@ class Collector:
         # Resident blocks the router wrote itself at acquire (``record_dispatch_blocks``),
         # logged in the kv-events tally as ``router_recorded`` (cross-check vs engine-side stored).
         self._dispatch_recorded_blocks: int = 0
+        # Last-emit time for the throttled session-ledger summary.
+        self._phase_last_log: float = 0.0
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -222,6 +225,13 @@ class Collector:
         replica (:meth:`_pin_dispatch_blocks`, feeding the absolute
         ``INFLIGHT_BLOCKS`` gauge); release unpins them (:meth:`_release_inflight_blocks`).
         ``INFLIGHT_TOKENS`` itself stays the raw prompt_len bookkeeping above.
+        Both events also drive the session-phase ledger: acquire marks the
+        session reasoning on the chosen replica, release flips it to acting
+        (tool-call phase) and anchors the release time — the soft
+        ``acting_hold`` account the capacity strategy subtracts from avail
+        (docs/design/turn-phase-admission.md §5.2/§5.3). Each event logs a
+        ``session-phase:`` line, and a throttled ``session-ledger:`` summary
+        reports phase counts and gap stats.
         Both acquire and release refresh the throttled ``router-dispatch``
         snapshot. Absolute (non-delta) updates are polled gauges, handled
         below. When rl-insight emit is on, each write also builds a
@@ -265,19 +275,33 @@ class Collector:
                         deltas[MetricKey.INFLIGHT_COUNT] = deltas.get(MetricKey.INFLIGHT_COUNT, 0) - 1
                     self._data_store.set_per_request(update.request_id, _PROMPT_LEN_KEY, raw_tokens)
                     self._pin_dispatch_blocks(update.node_id, update.request_id, update.prompt_ids)
+                    self._data_store.mark_session_reasoning(update.request_id, update.node_id, raw_tokens)
+                    logger.info(
+                        "session-phase: rid=%s turn=%s phase=reasoning replica=%s ctx=%s",
+                        update.request_id,
+                        deltas[MetricKey.INFLIGHT_TURN_SUM],
+                        update.node_id,
+                        raw_tokens,
+                    )
             elif is_release:
                 if update.request_id is None:
                     logger.debug(
                         "release (COMPLETED_COUNT) update missing request_id — skipping turn/token/block subtraction"
                     )
                 else:
-                    deltas[MetricKey.INFLIGHT_TURN_SUM] = -self._data_store.get_per_request(
-                        update.request_id, "turn", 0
-                    )
-                    deltas[MetricKey.INFLIGHT_TOKENS] = -self._data_store.get_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, 0
-                    )
+                    turn = self._data_store.get_per_request(update.request_id, "turn", 0)
+                    deltas[MetricKey.INFLIGHT_TURN_SUM] = -turn
+                    prompt_len = self._data_store.get_per_request(update.request_id, _PROMPT_LEN_KEY, 0)
+                    deltas[MetricKey.INFLIGHT_TOKENS] = -prompt_len
                     self._release_inflight_blocks(update.node_id, update.request_id)
+                    self._data_store.mark_session_acting(update.request_id, update.node_id)
+                    logger.info(
+                        "session-phase: rid=%s turn=%s phase=acting replica=%s ctx=%s",
+                        update.request_id,
+                        turn,
+                        update.node_id,
+                        prompt_len,
+                    )
             new_values = self._data_store.incr_metrics(update.node_id, deltas)
             if is_acquire or is_release:
                 emitter.on_write(
@@ -291,6 +315,7 @@ class Collector:
                     )
                 )
             self._maybe_log_dispatch_stats()
+            self._maybe_log_phase_ledger()
             return
         snapshots = self._data_store.refresh_metrics({update.node_id: update.metrics})
         emitter.on_write(
@@ -404,6 +429,29 @@ class Collector:
                 f"router-dispatch replica={rep} dispatched={dispatched} completed={completed} "
                 f"inflight_turn_sum={inflight_turn_sum} prompt_len_sum={prompt_len_sum}"
             )
+
+    def _maybe_log_phase_ledger(self) -> None:
+        """Emit a throttled session-ledger summary (the ``session-ledger:`` line).
+
+        Time-throttled like the dispatch snapshot. Observation for the
+        acting-hold account: dead sessions surface as a growing acting
+        population with old gaps (their hold decays toward 0); the
+        per-replica ``acting_ctx`` sums are the undecayed raw claims.
+        """
+        now = time.monotonic()
+        if now - self._phase_last_log < _PHASE_LOG_INTERVAL_S:
+            return
+        self._phase_last_log = now
+        s = self._data_store.session_ledger_summary()
+        logger.info(
+            "session-ledger: sessions=%s reasoning=%s acting=%s gap_mean=%.0fs gap_max=%.0fs acting_ctx=%s",
+            s["sessions"],
+            s["reasoning"],
+            s["acting"],
+            s["gap_mean_s"],
+            s["gap_max_s"],
+            s["acting_ctx"],
+        )
 
     def _log_evidence_window(self, node_id: str) -> None:
         """Emit a windowed evidence summary for one replica.

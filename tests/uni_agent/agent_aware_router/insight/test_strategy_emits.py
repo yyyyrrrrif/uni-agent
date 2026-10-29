@@ -31,6 +31,7 @@ from uni_agent import rl_insight as facade
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
+from uni_agent.agent_aware_router.store.session_phase_ledger import SessionPhaseLedger
 from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
 from uni_agent.agent_aware_router.types import MetricKey, SlowCut
@@ -74,6 +75,7 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
 def recording(monkeypatch: pytest.MonkeyPatch) -> _RecordingRLInsight:
     PerReplicaStore._instance = None
     PerRequestStore._instance = None
+    SessionPhaseLedger._instance = None  # stale acting rows would skew the exact avail_ratio asserts
     monkeypatch.setenv(facade.ENABLE_ENV, "1")
     monkeypatch.setattr(facade, "_enabled", True)  # pre-flip gate cache
     rl = _RecordingRLInsight()
@@ -81,6 +83,7 @@ def recording(monkeypatch: pytest.MonkeyPatch) -> _RecordingRLInsight:
     yield rl
     PerReplicaStore._instance = None
     PerRequestStore._instance = None
+    SessionPhaseLedger._instance = None
 
 
 def _names(rl: _RecordingRLInsight, metric_type: str | None = None) -> set[str]:

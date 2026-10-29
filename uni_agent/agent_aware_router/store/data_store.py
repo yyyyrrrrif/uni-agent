@@ -22,6 +22,7 @@ from ..types import Layer, MetricKey
 from .kv_cache_store import KVCacheStore
 from .per_replica_store import PerReplicaStore
 from .per_request_store import PerRequestStore
+from .session_phase_ledger import SessionPhaseLedger
 
 _STICKY_KEY = "sticky_replica"
 
@@ -46,6 +47,7 @@ class DataStore:
         self._metrics = PerReplicaStore.singleton()
         self._kv = KVCacheStore.singleton()
         self._per_request = PerRequestStore.singleton()
+        self._phase = SessionPhaseLedger.singleton()
 
     # ── PerReplicaStore operations ─────────────────────────────────────────
 
@@ -326,3 +328,30 @@ class DataStore:
     def del_per_request(self, request_id: str, key: str) -> None:
         """Drop one per-request value (no-op if absent)."""
         self._per_request.delete(request_id, key)
+
+    # ── Session phase ledger (generation vs tool-call probe) ───────────
+
+    def mark_session_reasoning(self, request_id: str, replica_id: str, ctx_tokens: int) -> None:
+        """Mark ``request_id`` reasoning (generation in flight) on ``replica_id``.
+
+        Driven by the acquire event; ``ctx_tokens`` is the acquire's prompt
+        length — the cache claim the session holds while acting after release.
+        """
+        self._phase.mark_reasoning(request_id, replica_id, ctx_tokens)
+
+    def mark_session_acting(self, request_id: str, replica_id: str) -> None:
+        """Mark ``request_id`` acting (tool-call phase) on ``replica_id`` (release event)."""
+        self._phase.mark_acting(request_id, replica_id)
+
+    def acting_hold_by_replica(self, half_life_s: float) -> dict[str, float]:
+        """Soft commitment per replica: ``Σ ctx × 2^(−gap/τ)`` over acting sessions.
+
+        The tool-call-phase token claim the capacity account subtracts from
+        free tokens (``docs/design/turn-phase-admission.md`` §5.3); ``τ =
+        half_life_s``.
+        """
+        return self._phase.acting_hold_by_replica(half_life_s)
+
+    def session_ledger_summary(self) -> dict:
+        """Phase counts / acting-gap stats / per-replica acting ctx (periodic log raw material)."""
+        return self._phase.summary()

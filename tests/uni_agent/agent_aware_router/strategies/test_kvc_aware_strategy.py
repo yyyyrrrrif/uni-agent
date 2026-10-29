@@ -93,6 +93,8 @@ class FakeRouteDataProvider:
       inflight_blocks      – held in-flight KV blocks, dedup + ref counted (default 0)
       gpu_hit_pct          – GPU prefix cache hit percent 0-100 (default 0)
       tiers                – dict mapping tier name to hit rate (default {})
+      acting_hold_tokens   – tool-call-phase soft commitment served by
+                             acting_hold_by_replica, undecayed (default 0)
     """
 
     def __init__(self, data: dict[str, dict], sticky: dict[str, str] | None = None):
@@ -144,6 +146,10 @@ class FakeRouteDataProvider:
     def get_block_size(self) -> int | None:
         # Block size is learned from KV events; tests default to vLLM's 16.
         return 16
+
+    def acting_hold_by_replica(self, half_life_s: float) -> dict[str, float]:
+        # Decay is the ledger's business (unit-tested there); the fake serves raw sums.
+        return {rid: entry.get("acting_hold_tokens", 0.0) for rid, entry in self._data.items()}
 
     def get_per_request(self, request_id: str, key: str, default=None):
         return self._per_request.get(request_id, {}).get(key, default)
@@ -691,6 +697,47 @@ class TestFromConfigDebugEnv:
         with pytest.raises(StrategyError, match="capacity_threshold"):
             KVCacheAwareStrategy.from_config(cfg)
 
+    def test_acting_hold_knobs_env_override_and_error_layering(self, monkeypatch):
+        """ENABLE_ACTING_HOLD / ACTING_HOLD_HALF_LIFE: env overrides are debug-gated;
+        error layering is coercion first (ConfigError), then __init__ range (StrategyError)."""
+        from uni_agent.agent_aware_router.config.base import ConfigError
+        from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
+
+        cfg = KVCAwareStrategyConfig(load_threshold=0.85)
+        # Debug off → both env vars stay inert.
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with(None, ENABLE_ACTING_HOLD="false", ACTING_HOLD_HALF_LIFE="60"),
+        )
+        strat = KVCacheAwareStrategy.from_config(cfg)
+        assert strat.enable_acting_hold is True
+        assert strat.acting_hold_half_life == pytest.approx(120.0)
+
+        # Debug on → both knobs override their defaults.
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", ENABLE_ACTING_HOLD="false", ACTING_HOLD_HALF_LIFE="60"),
+        )
+        strat = KVCacheAwareStrategy.from_config(cfg)
+        assert strat.enable_acting_hold is False
+        assert strat.acting_hold_half_life == pytest.approx(60.0)
+
+        # Coercion error (non-float string) → ConfigError.
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", ACTING_HOLD_HALF_LIFE="two-minutes"),
+        )
+        with pytest.raises(ConfigError, match="acting_hold_half_life"):
+            KVCacheAwareStrategy.from_config(cfg)
+
+        # Range error (coerces fine, rejected by __init__ validation) → StrategyError.
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.debug.os.environ",
+            self._env_with("1", ACTING_HOLD_HALF_LIFE="0"),
+        )
+        with pytest.raises(StrategyError, match="acting_hold_half_life"):
+            KVCacheAwareStrategy.from_config(cfg)
+
     @pytest.mark.parametrize(
         ("knob", "value", "match"),
         [
@@ -1008,6 +1055,26 @@ class TestCapacityTokenAware:
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), request_id="r1")
         assert scores == [STICKY_TOP_SCORE, 0.0]
+
+    def test_acting_hold_shrinks_avail_and_filters(self):
+        """Released tool-phase sessions subtract ``acting_hold`` from avail like real occupancy.
+
+        rep_a raw avail=800 but hold=700 → 100 < 160 → filtered; with the knob off
+        the raw account returns (remaining 797 ≫ 157) and rep_a wins again.
+        """
+        data = {
+            # rep_a: half its blocks in flight, the rest claimed by acting sessions.
+            "rep_a": {"num_gpu_blocks": 100, "inflight_blocks": 50, "acting_hold_tokens": 700},
+            # rep_b: nearly full on real inflight alone → avail=160, right at the gate.
+            "rep_b": {"num_gpu_blocks": 100, "inflight_blocks": 90},
+        }
+        strat = self._cap_strat()
+        scores = strat.score(PROMPT_IDS, FakeRouteDataProvider(data), _replicas("rep_a", "rep_b"), request_id="r1")
+        assert scores == [0.0, STICKY_TOP_SCORE]
+
+        off = self._cap_strat(enable_acting_hold=False)
+        scores_off = off.score(PROMPT_IDS, FakeRouteDataProvider(data), _replicas("rep_a", "rep_b"), request_id="r1")
+        assert scores_off == [STICKY_TOP_SCORE, 0.0]
 
     def test_capacity_gate_threshold_via_capacity_threshold(self):
         """Gate threshold = ``cap·(1-capacity_threshold)``; capacity_threshold tunes it.

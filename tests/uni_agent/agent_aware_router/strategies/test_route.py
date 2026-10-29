@@ -119,6 +119,9 @@ class FakeRouteDataProvider:
     def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
         return 0.0
 
+    def acting_hold_by_replica(self, half_life_s):
+        return {}
+
     def kv_cache_load(self, replica_id):
         return 0.0
 

@@ -31,6 +31,7 @@ from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
+from uni_agent.agent_aware_router.store.session_phase_ledger import SessionPhaseLedger
 from uni_agent.agent_aware_router.types import Layer
 
 # ── Shared configuration constants ───────────────────────────────────────
@@ -167,3 +168,5 @@ def _reset_store_singletons():
     # PerRequestStore
     prq = PerRequestStore.singleton()
     prq.reset()
+    # SessionPhaseLedger
+    SessionPhaseLedger._instance = None
